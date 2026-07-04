@@ -48,7 +48,7 @@ export class OpenAiProvider implements LlmProvider {
       const choice = res.choices[0];
       if (choice?.finish_reason === 'content_filter') throw new LlmRefusalError('content_filter');
       const call = choice?.message.tool_calls?.[0];
-      if (!call || call.type !== 'function') {
+      if (call?.type !== 'function') {
         throw new Error('openai: model did not call the structured-output tool');
       }
       return JSON.parse(call.function.arguments);

@@ -23,7 +23,10 @@ describe('LLM provider seam (mock through the real Zod boundary)', () => {
 
   it('repairs once when the first response is invalid', async () => {
     // First return violates schema (n is a string), second is valid.
-    const llm = new MockLlm(() => [{ type: 'food', n: 'oops' }, { type: 'food', n: 3 }]);
+    const llm = new MockLlm(() => [
+      { type: 'food', n: 'oops' },
+      { type: 'food', n: 3 },
+    ]);
     const out = await llm.parse(req());
     expect(out).toEqual({ type: 'food', n: 3 });
     expect(llm.callCount).toBe(2);

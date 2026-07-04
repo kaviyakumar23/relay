@@ -40,7 +40,7 @@ export class AnthropicProvider implements LlmProvider {
 
       if (res.stop_reason === 'refusal') throw new LlmRefusalError('refusal');
       const block = res.content.find((b) => b.type === 'tool_use');
-      if (!block || block.type !== 'tool_use') {
+      if (block?.type !== 'tool_use') {
         throw new Error('anthropic: model did not call the structured-output tool');
       }
       return block.input;
