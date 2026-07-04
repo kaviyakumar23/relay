@@ -1,0 +1,122 @@
+[
+  {
+    "slack_user_id": "SEED_U01",
+    "display_name": "Anitha Rajan",
+    "skills": ["medical"],
+    "languages": ["ta", "en"],
+    "home_locality": "Taramani",
+    "radius_km": 6,
+    "capacity_per_day": 3,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "07:00", "end": "22:00" }
+  },
+  {
+    "slack_user_id": "SEED_U02",
+    "display_name": "Karthik Sundaram",
+    "skills": ["driver", "boat"],
+    "languages": ["ta", "en"],
+    "home_locality": "Adyar",
+    "radius_km": 9,
+    "capacity_per_day": 2,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "06:00", "end": "20:00" }
+  },
+  {
+    "slack_user_id": "SEED_U03",
+    "display_name": "Priya Venkatesan",
+    "skills": ["cooking", "translation"],
+    "languages": ["ta", "en"],
+    "home_locality": "Velachery",
+    "radius_km": 5,
+    "capacity_per_day": 3,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "08:00", "end": "21:00" }
+  },
+  {
+    "slack_user_id": "SEED_U04",
+    "display_name": "Meena Krishnan",
+    "skills": ["cooking", "muscle"],
+    "languages": ["ta", "en"],
+    "home_locality": "Taramani",
+    "radius_km": 6,
+    "capacity_per_day": 4,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "06:30", "end": "22:00" }
+  },
+  {
+    "slack_user_id": "SEED_U05",
+    "display_name": "Suresh Balan",
+    "skills": ["boat", "muscle"],
+    "languages": ["ta"],
+    "home_locality": "Perungudi",
+    "radius_km": 8,
+    "capacity_per_day": 2,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "05:30", "end": "19:00" }
+  },
+  {
+    "slack_user_id": "SEED_U06",
+    "display_name": "Divya Nataraj",
+    "skills": ["medical", "translation"],
+    "languages": ["ta", "en"],
+    "home_locality": "Adyar",
+    "radius_km": 7,
+    "capacity_per_day": 3,
+    "availability": { "days": ["mon", "wed", "fri", "sat", "sun"], "start": "09:00", "end": "18:00" }
+  },
+  {
+    "slack_user_id": "SEED_U07",
+    "display_name": "Ramesh Iyer",
+    "skills": ["driver"],
+    "languages": ["ta", "en"],
+    "home_locality": "Guindy",
+    "radius_km": 12,
+    "capacity_per_day": 4,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri"], "start": "07:00", "end": "20:00" }
+  },
+  {
+    "slack_user_id": "SEED_U08",
+    "display_name": "Lakshmi Prasad",
+    "skills": ["cooking"],
+    "languages": ["ta", "en"],
+    "home_locality": "Madipakkam",
+    "radius_km": 5,
+    "capacity_per_day": 3,
+    "availability": { "days": ["sat", "sun"], "start": "07:00", "end": "21:00" }
+  },
+  {
+    "slack_user_id": "SEED_U09",
+    "display_name": "Vijay Anand",
+    "skills": ["tech", "translation"],
+    "languages": ["ta", "en"],
+    "home_locality": "Nungambakkam",
+    "radius_km": 10,
+    "capacity_per_day": 2,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "10:00", "end": "23:00" }
+  },
+  {
+    "slack_user_id": "SEED_U10",
+    "display_name": "Deepa Mohan",
+    "skills": ["driver", "muscle"],
+    "languages": ["ta"],
+    "home_locality": "Pallikaranai",
+    "radius_km": 8,
+    "capacity_per_day": 3,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "06:00", "end": "18:00" }
+  },
+  {
+    "slack_user_id": "SEED_U11",
+    "display_name": "Arjun Selvam",
+    "skills": ["boat", "driver"],
+    "languages": ["ta", "en"],
+    "home_locality": "Neelankarai",
+    "radius_km": 9,
+    "capacity_per_day": 2,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "05:00", "end": "19:00" }
+  },
+  {
+    "slack_user_id": "SEED_U12",
+    "display_name": "Kavya Ramesh",
+    "skills": ["medical", "cooking"],
+    "languages": ["ta", "en"],
+    "home_locality": "Velachery",
+    "radius_km": 6,
+    "capacity_per_day": 3,
+    "availability": { "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"], "start": "08:00", "end": "20:00" }
+  }
+]
