@@ -7,8 +7,11 @@ services:
       POSTGRES_USER: relay
       POSTGRES_PASSWORD: relay
       POSTGRES_DB: relay
+    # Host port 5433 (not 5432) so `docker compose up` never collides with a
+    # host Postgres already on 5432 — localhost:5432 would resolve to the host
+    # service, not this container. DATABASE_URL in .env.example matches.
     ports:
-      - '5432:5432'
+      - '5433:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
