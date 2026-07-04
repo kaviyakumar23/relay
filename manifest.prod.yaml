@@ -1,0 +1,69 @@
+# Relay — PROD app manifest (HTTP mode, served from AWS behind CloudFront).
+# REPLACE_ME_CLOUDFRONT: set to the CloudFront domain that Phase G (infra/) outputs,
+# e.g. https://dxxxxxxxxxxxx.cloudfront.net — Slack requires https request URLs.
+display_information:
+  name: Relay — Crisis Coordination
+  description: Verified crisis coordination — every need tracked, every promise proven.
+  background_color: "#B71C1C"
+features:
+  bot_user:
+    display_name: relay
+    always_online: true
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  assistant_view:
+    assistant_description: Ask Relay about live relief operations — open needs, drifting promises, verified deliveries.
+    suggested_prompts:
+      - title: Open critical needs
+        message: Any critical needs still open?
+      - title: Who is drifting?
+        message: Which obligations are past their SLA right now?
+      - title: Sitrep
+        message: Give me the current situation report.
+  slash_commands:
+    - command: /relay
+      url: https://REPLACE_ME_CLOUDFRONT/slack/events
+      description: sitrep · report · need · volunteer · demo
+      usage_hint: "sitrep | report | need | volunteer | demo start flood-1"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - assistant:write
+      - canvases:read
+      - canvases:write
+      - channels:history
+      - channels:read
+      - chat:write
+      - commands
+      - files:read
+      - files:write
+      - groups:history
+      - groups:read
+      - im:history
+      - im:read
+      - im:write
+      - reactions:read
+      - reactions:write
+      - users:read
+settings:
+  event_subscriptions:
+    request_url: https://REPLACE_ME_CLOUDFRONT/slack/events
+    bot_events:
+      - app_home_opened
+      - app_mention
+      - assistant_thread_started
+      - assistant_thread_context_changed
+      - message.channels
+      - message.groups
+      - message.im
+      - reaction_added
+  interactivity:
+    is_enabled: true
+    request_url: https://REPLACE_ME_CLOUDFRONT/slack/events
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

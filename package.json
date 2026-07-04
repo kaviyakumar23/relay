@@ -1,0 +1,49 @@
+{
+  "name": "relay-crisis",
+  "version": "0.1.0",
+  "description": "Relay — verified crisis coordination inside Slack. Every need tracked, every promise proven.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run -c vitest.integration.config.ts",
+    "eval": "tsx eval/run.ts",
+    "demo": "tsx src/demo/run.ts",
+    "db:migrate": "tsx src/lib/migrate.ts",
+    "seed": "tsx src/demo/seed.ts",
+    "scenario:lint": "tsx demo/scenarios/lint.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@slack/bolt": "^4.7.3",
+    "@slack/web-api": "^7.17.0",
+    "bullmq": "^5.34.0",
+    "dotenv": "^17.4.2",
+    "ioredis": "^5.4.2",
+    "openai": "^6.42.0",
+    "pg": "^8.13.1",
+    "pino": "^9.6.0",
+    "tsx": "^4.19.2",
+    "yaml": "^2.7.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.11.10",
+    "pino-pretty": "^13.0.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.9"
+  }
+}
