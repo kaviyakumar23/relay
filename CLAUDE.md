@@ -58,7 +58,8 @@ Patterns come from sibling repos (read them before reinventing): `../kept` (even
 - Block Kit action IDs encode the target: `action:entityId` via `actionId()/parseActionId()` (`src/surfaces/`).
 - Tests are hermetic-first (memory store, inline queue, RecordingNotifier); real-infra tests live in `tests/integration/` and `describe.skipIf` without env.
 - Biome for lint/format (single quotes, 2-space, width 120). `console` is banned outside `console.error` in CLI entrypoints — use `logger`.
-- Prompts are named files in `src/llm/prompts/` (P-1 intake-extraction … P-7 ask-relay). Model tiers per task live in `src/config.ts` `TASK_CONFIG` — Sonnet: P-1, P-5, P-6, P-7; Haiku: P-2, P-3, P-4.
+- **LLM is provider-agnostic** (`src/llm/`): `createLlm()` picks OpenAI or Anthropic from `LLM_PROVIDER` (default openai). Both use forced tool use + `z.toJSONSchema` + Zod validation at the boundary, with a one-pass repair → `LlmParseError` (caller maps to `NEEDS_REVIEW`). Never call a vendor SDK directly outside `src/llm/`; go through the `LlmProvider` seam so the swap stays one env var. Tests use `MockLlm` through the same boundary.
+- Prompts are named files in `src/llm/prompts/` (P-1 intake-extraction … P-7 ask-relay). Per-task model tiers live in `src/llm/models.ts` (`TASK_TIER`): quality tier for P-1/P-5/P-6/P-7, cheap tier for P-2/P-3/P-4; each provider resolves the tier to a concrete model.
 
 ## Cut lines (pre-agreed — slips trigger cuts, not debates)
 

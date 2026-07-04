@@ -11,6 +11,10 @@ export const config = Object.freeze({
     // Presence of an app-level token switches Bolt to Socket Mode (local dev).
     appToken: env.SLACK_APP_TOKEN ?? '',
   }),
+  // LLM provider is swappable — the core pipeline needs an LLM, not a specific
+  // vendor. Default 'openai'; set LLM_PROVIDER=anthropic to switch. Both key
+  // slots exist so either works and dedupe embeddings (OpenAI) can coexist.
+  llmProvider: (env.LLM_PROVIDER === 'anthropic' ? 'anthropic' : 'openai') as 'openai' | 'anthropic',
   anthropicApiKey: env.ANTHROPIC_API_KEY ?? '',
   openaiApiKey: env.OPENAI_API_KEY ?? '',
   databaseUrl: env.DATABASE_URL ?? '',
