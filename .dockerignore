@@ -1,0 +1,18 @@
+# Docker build context = repo root (CDK fromAsset('..')). Excludes must include
+# infra/ and .git — otherwise CDK recursively copies infra/cdk.out into itself
+# (ENAMETOOLONG). Keep src/, db/, demo/, seed/ — the running app reads scenario
+# and seed files at runtime (live injector + `npm run seed`).
+node_modules
+infra
+.git
+.github
+cdk.out
+coverage
+dist
+tests
+eval
+docs
+*.log
+.env
+.env.*
+.DS_Store

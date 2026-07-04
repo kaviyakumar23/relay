@@ -1,0 +1,34 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'infra/**'
+      - 'src/**'
+      - 'Dockerfile'
+
+permissions:
+  id-token: write # OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # Set repo variable AWS_DEPLOY_ROLE_ARN to RelayCiStack's DeployRoleArn output.
+    if: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-south-1
+      - name: Deploy RelayStack
+        working-directory: infra
+        run: |
+          npm ci
+          npx cdk deploy RelayStack --require-approval never
