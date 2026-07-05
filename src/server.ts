@@ -1,6 +1,7 @@
 import { WebClient } from '@slack/web-api';
 import pg from 'pg';
 import { config } from './config';
+import { createContactVault } from './ingest/contactVaultStore';
 import { MemoryDedupeStore, PgDedupeStore } from './ingest/dedupe';
 import { SlackNotifier } from './ingest/notifier';
 import { buildSlackApp, type MutableRoles } from './ingest/slackApp';
@@ -9,6 +10,8 @@ import type { EventStore } from './ledger/store/eventStore';
 import { InMemoryEventStore } from './ledger/store/memoryStore';
 import { PostgresEventStore } from './ledger/store/postgresStore';
 import { logger } from './lib/logger';
+import { createLlm } from './llm/provider';
+import { type Extractor, HeuristicExtractor, LlmExtractor } from './pipeline/extract';
 import { makeIntakeJobHandler } from './pipeline/intakeJob';
 import { BullMQQueue, InlineQueue, type PipelineQueue } from './pipeline/queue';
 
@@ -50,7 +53,15 @@ async function main(): Promise<void> {
   // The notifier posts via its own Web client (independent of Bolt's receiver).
   const notifier = new SlackNotifier(new WebClient(botToken), () => roles.dispatchChannelId);
 
-  const jobHandler = makeIntakeJobHandler({ service, notifier, isDemo: false });
+  // P-1 extractor: the real provider when a key is configured, else the deterministic
+  // heuristic so intake still classifies (offline). The core pipeline is provider-agnostic.
+  const hasLlmKey = config.llmProvider === 'anthropic' ? config.anthropicApiKey !== '' : config.openaiApiKey !== '';
+  const extractor: Extractor = hasLlmKey ? new LlmExtractor(createLlm()) : new HeuristicExtractor();
+  // Encrypted contact vault (Postgres when a pool exists, else in-memory; disabled
+  // with a single warning when CONTACT_VAULT_KEY is unset).
+  const vault = createContactVault({ keyHex: config.contactVaultKey, pool });
+
+  const jobHandler = makeIntakeJobHandler({ service, notifier, extractor, vault, isDemo: false });
   let queue: PipelineQueue;
   if (config.redisUrl) {
     const bull = new BullMQQueue({ redisUrl: config.redisUrl, handler: jobHandler });
@@ -77,7 +88,12 @@ async function main(): Promise<void> {
   });
 
   logger.info(
-    { store: pool ? 'postgres' : 'memory', queue: config.redisUrl ? 'bullmq' : 'inline' },
+    {
+      store: pool ? 'postgres' : 'memory',
+      queue: config.redisUrl ? 'bullmq' : 'inline',
+      extractor: extractor.name,
+      vault: vault ? 'on' : 'off',
+    },
     'relay: booting live mode',
   );
   await start();

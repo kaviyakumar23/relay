@@ -1,23 +1,38 @@
 import type { Notifier } from '../ingest/notifier';
-import { needCreatedKey } from '../ledger/idempotency';
+import { needCreatedKey, needEventKey } from '../ledger/idempotency';
 import type { NeedService } from '../ledger/needService';
-import type { Actor } from '../ledger/types';
+import type { Actor, ProjectedNeed } from '../ledger/types';
 import { logger } from '../lib/logger';
+import type { ContactVault } from '../lib/vault';
+import type { Extractor } from './extract';
+import { runExtraction } from './extract';
 import type { IntakeJob, JobHandler, JobTransient } from './queue';
 
-// The intake worker (BUILD-DOC §16.2 walking skeleton). Turns an IntakeJob into a
-// NeedCreated ledger event and a dispatch card. Day-1 it does no extraction: it
-// creates a need with default type='other' / severity='low' and posts the dumb
-// card. Business-level idempotency comes from needCreatedKey(team,channel,ts) —
-// the same Slack message always maps to the same need, even if transport dedupe
-// was bypassed (e.g. a retry with a fresh envelope id).
+// The intake worker (BUILD-DOC §16.2/§16.3). Turns an IntakeJob into a NeedCreated
+// ledger event, runs P-1 extraction, and posts a dispatch card that reflects the
+// extraction:
+//   createNeed (NEW / other / low)
+//     → runExtraction(transient.text) → ExtractionCompletedPayload (+ contact)
+//     → vault the contact BEFORE dispatch (PII, invariant #5)
+//     → dispatch ExtractionCompleted (agent actor → TRIAGED or NEEDS_REVIEW)
+//     → post the card from the resulting projection
+// Business idempotency: needCreatedKey(team,channel,ts) collapses redeliveries, and
+// the ExtractionCompleted event is keyed by needEventKey(needId,type,ts). Zero-copy
+// (invariant #5): raw text rides transiently and is never persisted or logged — we
+// log only derived fields (need_type/severity/needs_review/text_len).
 
 /** NeedCreated is a non-consequential (agent) transition — no human gate. */
 const INTAKE_ACTOR: Actor = { type: 'agent', id: 'relay-intake' };
+/** ExtractionCompleted is emitted by the extraction agent (no human gate, §6.2). */
+const EXTRACT_ACTOR: Actor = { type: 'agent', id: 'relay-extract' };
 
 export interface IntakeJobDeps {
   service: NeedService;
   notifier: Notifier;
+  /** P-1 extractor (LLM in live mode, deterministic heuristic in tests/demo). */
+  extractor: Extractor;
+  /** Encrypted contact vault. Undefined = vaulting disabled (dev without a key). */
+  vault?: ContactVault;
   /** Clock for the event timestamp + projection (defaults to Date.now). */
   now?: () => number;
   /** Override the creating actor (defaults to the intake agent). */
@@ -26,26 +41,58 @@ export interface IntakeJobDeps {
 }
 
 /**
- * Extraction placeholder (Jul 5 phase). Raw message text may arrive transiently in
- * memory; later phases will run P-1 extraction here. It is NEVER persisted or
- * logged — we record only its length so the memory boundary is observable without
- * leaking a single character of content.
+ * Run P-1 extraction and apply it to a freshly-created need. Vaults any contact
+ * BEFORE the dispatch (so the reveal path is backed the instant the card renders),
+ * then dispatches ExtractionCompleted and returns the resulting projection. Never
+ * leaks raw text or the contact into a log line.
  */
-function extractionPlaceholder(text: string | undefined, job: IntakeJob): void {
-  logger.debug(
-    { channel: job.channelId, ts: job.messageTs, text_len: text?.length ?? 0 },
-    'intake: extraction pending (placeholder — text stays in memory, never persisted)',
+async function applyExtraction(
+  needId: string,
+  job: IntakeJob,
+  text: string,
+  nowMs: number,
+  deps: IntakeJobDeps,
+  fallback: ProjectedNeed,
+): Promise<ProjectedNeed> {
+  const { payload, contact } = await runExtraction(text, deps.extractor);
+
+  if (contact !== null && deps.vault !== undefined) {
+    await deps.vault.put(needId, contact);
+  }
+
+  const result = await deps.service.dispatch(
+    needId,
+    { type: 'ExtractionCompleted', payload },
+    {
+      actor: EXTRACT_ACTOR,
+      at: new Date(nowMs).toISOString(),
+      idempotencyKey: needEventKey(needId, 'ExtractionCompleted', job.messageTs),
+      now: nowMs,
+    },
   );
+
+  const projection = result.need ?? (await deps.service.getNeed(needId, nowMs)) ?? fallback;
+  logger.info(
+    {
+      need_id: needId,
+      need_type: payload.need_type,
+      severity: projection.severity,
+      state: projection.state,
+      needs_review: payload.needs_review === true,
+      contact_vaulted: contact !== null && deps.vault !== undefined,
+      text_len: text.length,
+    },
+    'intake: extraction applied',
+  );
+  return projection;
 }
 
-/** Process one intake job: create the need (idempotently) and post its card. */
+/** Process one intake job: create the need (idempotently), extract, and post its card. */
 export async function runIntakeJob(
   job: IntakeJob,
   transient: JobTransient | undefined,
   deps: IntakeJobDeps,
 ): Promise<void> {
-  extractionPlaceholder(transient?.text, job);
-
   const nowMs = deps.now?.() ?? Date.now();
   const idempotencyKey = needCreatedKey(job.teamId, job.channelId, job.messageTs);
 
@@ -58,14 +105,6 @@ export async function runIntakeJob(
     isDemo: deps.isDemo ?? false,
   });
 
-  if (outcome.status === 'created') {
-    await deps.notifier.postDispatchCard({ needId: outcome.needId, publicId: outcome.publicId }, outcome.need);
-    logger.info(
-      { need_id: outcome.needId, public_id: outcome.publicId, channel: job.channelId },
-      'intake: need created + dispatch card posted',
-    );
-    return;
-  }
   if (outcome.status === 'deduped') {
     logger.info(
       { need_id: outcome.needId, public_id: outcome.publicId, channel: job.channelId },
@@ -73,7 +112,37 @@ export async function runIntakeJob(
     );
     return;
   }
-  logger.warn({ code: outcome.code, reason: outcome.reason, channel: job.channelId }, 'intake: need creation rejected');
+  if (outcome.status === 'rejected') {
+    logger.warn(
+      { code: outcome.code, reason: outcome.reason, channel: job.channelId },
+      'intake: need creation rejected',
+    );
+    return;
+  }
+
+  const target = { needId: outcome.needId, publicId: outcome.publicId };
+  let projection = outcome.need;
+
+  // Raw text is present in practice; if it is somehow absent we skip extraction and
+  // post the plain (pre-extraction) card rather than losing the need.
+  if (transient?.text !== undefined) {
+    try {
+      projection = await applyExtraction(outcome.needId, job, transient.text, nowMs, deps, outcome.need);
+    } catch (err) {
+      // A message must never be lost: on any extraction/vault/dispatch failure, fall
+      // back to the pre-extraction NEW card so a human still sees the need.
+      logger.error(
+        { err, need_id: outcome.needId, channel: job.channelId, text_len: transient.text.length },
+        'intake: extraction/dispatch failed — posting pre-extraction card (need not lost)',
+      );
+    }
+  }
+
+  await deps.notifier.postDispatchCard(target, projection);
+  logger.info(
+    { need_id: outcome.needId, public_id: outcome.publicId, channel: job.channelId, state: projection.state },
+    'intake: need created + dispatch card posted',
+  );
 }
 
 /** Build the queue's job handler. Single-kind for the skeleton; add cases as phases land. */

@@ -10,7 +10,8 @@ export type NeedType = z.infer<typeof NeedTypeSchema>;
 
 // Severity floors only raise (CLAUDE.md invariant 4 / BUILD-DOC §11.2); the model may
 // never lower a keyword-floored severity. The deterministic floor lives in
-// eval/score.ts (FLOOR_KEYWORDS) — that is the single source of truth for the gold set.
+// src/pipeline/severityFloor.ts (FLOOR_KEYWORDS) — the single source of truth, which
+// eval/score.ts re-exports so the gold set and the runtime extractor stay identical.
 export const SeveritySchema = z.enum(['critical', 'high', 'medium', 'low']);
 export type Severity = z.infer<typeof SeveritySchema>;
 

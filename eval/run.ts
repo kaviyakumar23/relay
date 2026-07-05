@@ -1,15 +1,20 @@
 import { readFileSync } from 'node:fs';
 import { z } from 'zod';
+import { config } from '../src/config';
 import type { NeedDraft } from '../src/llm/needDraft';
 import { NeedDraftSchema } from '../src/llm/needDraft';
+import { createLlm, LlmParseError, LlmRefusalError } from '../src/llm/provider';
+import { HeuristicExtractor, LlmExtractor } from '../src/pipeline/extract';
 import type { Aggregate, EvalLanguage, EvalResult } from './score';
 import { aggregate, FLOOR_KEYWORDS, hitsCriticalFloor, scoreCase } from './score';
 
-// eval/run.ts — `npm run eval`. Day-1 deliverable (BUILD-DOC §10.5). Loads and
-// Zod-validates the 40-case gold set, asserts the dataset's honesty invariants, and
-// prints composition. The accuracy metrics require the P-1 extractor, which lands
-// Jul 5; until it is wired into the seam below this harness prints exactly which
-// metrics await it and exits 0 — it never fabricates a number (CLAUDE.md eval-honesty).
+// eval/run.ts — `npm run eval` (BUILD-DOC §10.5). Loads and Zod-validates the 40-case
+// gold set, asserts the dataset's honesty invariants, prints composition, then scores
+// the P-1 extractor(s). The deterministic HeuristicExtractor is ALWAYS scored so the
+// harness prints real offline baseline numbers with zero env; when an OpenAI/Anthropic
+// key is present, the LlmExtractor path is ALSO scored and printed side by side. Every
+// number is computed by eval/score.ts from real predictions — none is fabricated
+// (CLAUDE.md eval-honesty). eval/ imports from src/ only (Docker excludes eval/).
 //
 // All human-readable output goes through console.error (repo CLI convention; see
 // src/lib/migrate.ts). logger is for structured service logs, not eval reports.
@@ -167,23 +172,6 @@ function printComposition(cases: EvalCase[]): void {
   console.error('');
 }
 
-const AWAITED_METRICS: readonly string[] = [
-  'field accuracy — overall + per-field (type, severity, locality_guess, people_count, contact_raw, provenance)',
-  'critical-severity recall',
-  'critical-severity precision',
-  'per-language field accuracy (en, ta-en)',
-  'needs-review rate',
-];
-
-function printAwaitingExtractor(): void {
-  console.error('Extractor: NOT WIRED YET (P-1 lands Jul 5).');
-  console.error('The following metrics require the extract() seam and are NOT computed:');
-  for (const m of AWAITED_METRICS) console.error(`  - ${m}`);
-  console.error('');
-  console.error('Refusing to fabricate accuracy numbers (BUILD-DOC §10.5 / CLAUDE.md eval-honesty).');
-  console.error('Wire the extractor in loadExtractor() below; scoring + reporting are already built.');
-}
-
 const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
 
 function printMetrics(agg: Aggregate): void {
@@ -208,14 +196,48 @@ function printMetrics(agg: Aggregate): void {
 }
 
 // ── EXTRACTOR SEAM ─────────────────────────────────────────────────────────────
-// Jul 5: return the real P-1 extractor here. Signature must be:
-//   (text: string) => Promise<NeedDraft | null>   // null = punted to NEEDS_REVIEW
-// e.g.  return (text) => extractNeedDraft(text);   // from src/pipeline/extract.ts
-// Everything downstream (scoreCase, aggregate, printMetrics) is already wired.
-type Extractor = (text: string) => Promise<NeedDraft | null>;
+// A named extractor maps a message to a NeedDraft, or null when it punts to
+// NEEDS_REVIEW (parse/refusal failure after the provider's repair pass — scored as a
+// deferral, never as a correct answer).
+interface NamedExtractor {
+  label: string;
+  run: (text: string) => Promise<NeedDraft | null>;
+}
 
-function loadExtractor(): Extractor | null {
-  return null;
+/** The deterministic offline baseline — always available, zero env. */
+function heuristicRunner(): NamedExtractor {
+  const ex = new HeuristicExtractor();
+  return { label: 'Heuristic baseline (deterministic · no API key)', run: (text) => ex.extract(text) };
+}
+
+/** The real P-1 provider path — only when a key is configured. Maps a parse/refusal
+ * failure to null (needs-review), exactly as the live pipeline does. */
+function llmRunner(): NamedExtractor | null {
+  const hasKey = config.llmProvider === 'anthropic' ? config.anthropicApiKey !== '' : config.openaiApiKey !== '';
+  if (!hasKey) return null;
+  const ex = new LlmExtractor(createLlm());
+  return {
+    label: `LLM path (${ex.name})`,
+    run: async (text) => {
+      try {
+        return await ex.extract(text);
+      } catch (err) {
+        if (err instanceof LlmParseError || err instanceof LlmRefusalError) return null;
+        throw err;
+      }
+    },
+  };
+}
+
+async function scoreExtractor(named: NamedExtractor, cases: EvalCase[]): Promise<void> {
+  console.error(`── ${named.label} ──`);
+  const results: EvalResult[] = [];
+  for (const c of cases) {
+    const predicted = await named.run(c.text);
+    results.push({ id: c.id, language: c.language, score: scoreCase(c.gold, predicted) });
+  }
+  printMetrics(aggregate(results));
+  console.error('');
 }
 
 async function main(): Promise<number> {
@@ -224,18 +246,18 @@ async function main(): Promise<number> {
   validateDataset(cases);
   printComposition(cases);
 
-  const extract = loadExtractor();
-  if (extract === null) {
-    printAwaitingExtractor();
-    return 0;
-  }
+  // Always score the deterministic baseline so `npm run eval` prints real offline numbers.
+  await scoreExtractor(heuristicRunner(), cases);
 
-  const results: EvalResult[] = [];
-  for (const c of cases) {
-    const predicted = await extract(c.text);
-    results.push({ id: c.id, language: c.language, score: scoreCase(c.gold, predicted) });
+  // Also score the real provider when a key is present; otherwise say so honestly.
+  const llm = llmRunner();
+  if (llm !== null) {
+    await scoreExtractor(llm, cases);
+  } else {
+    console.error('LLM path: SKIPPED — no OPENAI_API_KEY / ANTHROPIC_API_KEY set.');
+    console.error('The heuristic baseline above is the offline number; set a key to also score the P-1 provider.');
+    console.error('');
   }
-  printMetrics(aggregate(results));
   return 0;
 }
 

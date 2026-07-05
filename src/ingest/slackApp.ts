@@ -188,6 +188,20 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     await ack();
     await postComingSoon('Assign', body, action);
   });
+  // Reveal-contact stub: the real handler decrypts from contact_vault and writes an
+  // audit_log row (later vault-UI phase). For now, ack fast and explain — never
+  // surface the number here. The card only renders this button when a contact exists.
+  app.action(/^need_reveal:/, async ({ ack, body, action }) => {
+    await ack();
+    const { id } = parseActionId(readActionId(action));
+    const { channel, user } = readBodyContext(body);
+    if (!channel || !user) return;
+    await deps.notifier.postEphemeral({
+      channel,
+      user,
+      text: `Revealing a beneficiary contact writes an audit_log entry — the reveal UI ships with the vault phase. (need ${id || 'unknown'})`,
+    });
+  });
 
   // Global safety net so a listener exception is never swallowed.
   app.error(async (error) => {

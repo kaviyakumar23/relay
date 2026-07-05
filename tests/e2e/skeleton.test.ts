@@ -44,22 +44,27 @@ describe('skeleton e2e — intake message → NeedCreated + dispatch card', () =
     // Public ids are monotonic N-000x.
     expect(a.notifier.publicIds()).toEqual(['N-0001', 'N-0002', 'N-0003']);
 
-    // Every need projects to NEW, and its row cache agrees.
+    // Extraction now runs in the intake job: each of these three messages classifies
+    // to a known type + locality (none garbled), so every need advances NEW → TRIAGED
+    // and its row cache agrees. (Day-1 asserted NEW here; the ExtractionCompleted event
+    // is why that changed.)
     for (const n of needs) {
-      expect(n.state).toBe('NEW');
-      expect(a.store.getRow(n.need_id)?.status).toBe('NEW');
+      expect(n.state).toBe('TRIAGED');
+      expect(a.store.getRow(n.need_id)?.status).toBe('TRIAGED');
     }
 
-    // The first event of each need is NeedCreated carrying the deterministic key.
+    // The first event of each need is still NeedCreated carrying the deterministic key
+    // (extraction appends a second ExtractionCompleted event after it).
     for (let i = 0; i < EVENTS.length; i++) {
       const card = a.notifier.cards[i];
       const ev = EVENTS[i];
       if (!card || !ev) throw new Error('missing card/event');
-      expect(card.projection.state).toBe('NEW');
+      expect(card.projection.state).toBe('TRIAGED');
       const log = await a.store.getEvents(card.needId);
       const first = log[0];
       if (!first) throw new Error('empty event log');
       expect(first.type).toBe('NeedCreated');
+      expect(log[1]?.type).toBe('ExtractionCompleted');
       expect(first.idempotency_key).toBe(needCreatedKey(a.teamId, a.intakeChannelId, ev.messageTs));
     }
   });

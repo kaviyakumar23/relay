@@ -1,4 +1,5 @@
 import type { NeedDraft, Severity } from '../src/llm/needDraft';
+import { FLOOR_KEYWORDS, hasFloorKeyword } from '../src/pipeline/severityFloor';
 
 // eval/score.ts — pure, deterministic scoring for the intake-extraction eval
 // (BUILD-DOC §10.5). No LLM, no network, no clock. Every number `npm run eval`
@@ -9,41 +10,15 @@ export type EvalLanguage = 'en' | 'ta-en';
 
 // ── Deterministic severity floor ────────────────────────────────────────────────
 // CLAUDE.md invariant 4 / BUILD-DOC §11.2: these keywords force severity=critical and
-// the model may never lower them. This is the single source of truth for the gold
-// set's critical justification — eval/run.ts asserts that every gold critical case
-// contains at least one of these and that no non-critical case does. The runtime
-// extractor enforces the same floor; here it documents why each critical is critical.
-//
-// FLOOR KEYWORDS (case-insensitive substring match):
-//   trapped · drowning · dialysis · oxygen · chest pain · unconscious ·
-//   not breathing · cardiac · heart attack · seizure · bleeding ·
-//   child · children · baby · infant · newborn · in labour · in labor
-export const FLOOR_KEYWORDS: readonly string[] = [
-  'trapped',
-  'drowning',
-  'dialysis',
-  'oxygen',
-  'chest pain',
-  'unconscious',
-  'not breathing',
-  'cardiac',
-  'heart attack',
-  'seizure',
-  'bleeding',
-  'child',
-  'children',
-  'baby',
-  'infant',
-  'newborn',
-  'in labour',
-  'in labor',
-];
+// the model may never lower them. The canonical list + predicate now live in
+// src/pipeline/severityFloor.ts — runtime code under src/ must not import from eval/
+// (Docker excludes eval/ via .dockerignore), so the single source of truth moved there
+// and is re-exported here. eval/run.ts asserts every gold critical case contains a floor
+// keyword and no non-critical case does; the runtime extractor enforces the same floor.
+export { FLOOR_KEYWORDS };
 
 /** True when a message contains a deterministic critical-floor keyword. */
-export function hitsCriticalFloor(text: string): boolean {
-  const t = text.toLowerCase();
-  return FLOOR_KEYWORDS.some((k) => t.includes(k));
-}
+export const hitsCriticalFloor = hasFloorKeyword;
 
 // The canonical fields the scorer compares provenance status on. `summary_en` and
 // `languages` are meta/derived and carry no provenance.
