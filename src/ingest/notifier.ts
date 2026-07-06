@@ -46,6 +46,12 @@ export interface Notifier {
   publishHome(userId: string, needs: ProjectedNeed[]): Promise<void>;
   /** Ephemeral notice to one user in a channel (e.g. "that button ships in triage"). */
   postEphemeral(args: { channel: string; user: string; text: string }): Promise<void>;
+  /** DM a user directly (Slack opens the IM by user id). Used for drift nudges. */
+  postDirect(userId: string, text: string, blocks: SlackBlock[]): Promise<CardRef>;
+  /** Post an arbitrary block message to #relay-dispatch (e.g. a reassignment card). */
+  postToDispatch(text: string, blocks: SlackBlock[]): Promise<CardRef>;
+  /** Re-render any posted message in place (nudge DM / reassignment card acknowledgement). */
+  updateMessage(ref: CardRef, text: string, blocks: SlackBlock[]): Promise<void>;
 }
 
 /** Minimal structural view of the Slack Web client methods the notifier uses. */
@@ -110,6 +116,22 @@ export class SlackNotifier implements Notifier {
   async postEphemeral(args: { channel: string; user: string; text: string }): Promise<void> {
     await this.client.chat.postEphemeral(args);
   }
+
+  async postDirect(userId: string, text: string, blocks: SlackBlock[]): Promise<CardRef> {
+    // Slack opens (or reuses) the IM when chat.postMessage targets a user id.
+    const res = await this.client.chat.postMessage({ channel: userId, text, blocks });
+    return { channel: res.channel ?? userId, ts: res.ts ?? '' };
+  }
+
+  async postToDispatch(text: string, blocks: SlackBlock[]): Promise<CardRef> {
+    const channel = this.dispatchChannel();
+    const res = await this.client.chat.postMessage({ channel, text, blocks });
+    return { channel: res.channel ?? channel, ts: res.ts ?? '' };
+  }
+
+  async updateMessage(ref: CardRef, text: string, blocks: SlackBlock[]): Promise<void> {
+    await this.client.chat.update({ channel: ref.channel, ts: ref.ts, text, blocks });
+  }
 }
 
 export interface RecordedCard extends CardRef {
@@ -138,12 +160,35 @@ export interface RecordedEphemeral {
   text: string;
 }
 
+/** A recorded direct message (drift nudge) — the DM's ref, target user, text + blocks. */
+export interface RecordedDm extends CardRef {
+  userId: string;
+  text: string;
+  blocks: SlackBlock[];
+}
+
+/** A recorded ad-hoc dispatch post (reassignment card) — its ref, text + blocks. */
+export interface RecordedPost extends CardRef {
+  text: string;
+  blocks: SlackBlock[];
+}
+
+/** A recorded in-place message update (nudge DM / reassignment card acknowledgement). */
+export interface RecordedMessageUpdate {
+  ref: CardRef;
+  text: string;
+  blocks: SlackBlock[];
+}
+
 /** Records every notification for assertions (no Slack required). */
 export class RecordingNotifier implements Notifier {
   readonly cards: RecordedCard[] = [];
   readonly updates: RecordedUpdate[] = [];
   readonly homes: RecordedHome[] = [];
   readonly ephemerals: RecordedEphemeral[] = [];
+  readonly dms: RecordedDm[] = [];
+  readonly dispatchPosts: RecordedPost[] = [];
+  readonly messageUpdates: RecordedMessageUpdate[] = [];
   private seq = 0;
 
   async postDispatchCard(need: DispatchTarget, projection: ProjectedNeed, opts?: CardRenderOptions): Promise<CardRef> {
@@ -179,6 +224,22 @@ export class RecordingNotifier implements Notifier {
 
   async postEphemeral(args: { channel: string; user: string; text: string }): Promise<void> {
     this.ephemerals.push({ ...args });
+  }
+
+  async postDirect(userId: string, text: string, blocks: SlackBlock[]): Promise<CardRef> {
+    const ref: CardRef = { channel: `D_${userId}`, ts: `ts_${this.seq++}` };
+    this.dms.push({ ...ref, userId, text, blocks });
+    return ref;
+  }
+
+  async postToDispatch(text: string, blocks: SlackBlock[]): Promise<CardRef> {
+    const ref: CardRef = { channel: 'C_DISPATCH_REC', ts: `ts_${this.seq++}` };
+    this.dispatchPosts.push({ ...ref, text, blocks });
+    return ref;
+  }
+
+  async updateMessage(ref: CardRef, text: string, blocks: SlackBlock[]): Promise<void> {
+    this.messageUpdates.push({ ref, text, blocks });
   }
 
   /** The public ids of every dispatch card posted, in order (for test assertions). */

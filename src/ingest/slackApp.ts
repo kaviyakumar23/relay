@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { App } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
+import { slaDueAtIso } from '../drift/sla';
 import { needEventKey } from '../ledger/idempotency';
 import type { NeedService } from '../ledger/needService';
 import type { EventStore } from '../ledger/store/eventStore';
+import type { ProjectedNeed } from '../ledger/types';
 import type { AuditLog } from '../lib/auditLog';
 import { logger } from '../lib/logger';
 import type { ContactVault } from '../lib/vault';
@@ -12,15 +14,28 @@ import { matchRationale } from '../match/rationale';
 import { type LocalityCoord, type ScoreNeed, topN } from '../match/scorer';
 import type { Volunteer, VolunteerStore } from '../match/volunteerStore';
 import type { PipelineQueue } from '../pipeline/queue';
+import { buildNudgeBlocks, DELAYED_ACTION, ENROUTE_ACTION, type NudgeAck, RELEASE_ACTION } from '../surfaces/driftCard';
+import {
+  buildDeliveryModal,
+  buildRecipientConfirmPrompt,
+  DELIVERY_CALLBACK_ID,
+  MARK_DELIVERED_ACTION,
+  parseDeliverySubmission,
+  RECIPIENT_CONFIRM_ACTION,
+  RECIPIENT_SUBSTITUTE_ACTION,
+  SIGNOFF_ACTION,
+} from '../surfaces/evidenceModal';
 import {
   ASSIGN_PICK_ACTION,
   buildMatchBlocks,
   type MatchNeed,
   parseAssignTarget,
   type RankedCandidate,
+  REASSIGN_PICK_ACTION,
 } from '../surfaces/matchCard';
 import { parseMergeTarget } from '../surfaces/needCard';
 import { ACTIONS, context, escapeMrkdwn, parseActionId, type SlackView } from '../surfaces/primitives';
+import { EVIDENCE_KIND_LABEL, verificationStatus } from '../surfaces/verification';
 import { buildVolunteerModal, parseVolunteerSubmission, VOLUNTEER_CALLBACK_ID } from '../surfaces/volunteerModal';
 import type { DedupeStore } from './dedupe';
 import { handleIntakeMessage } from './intakeHandler';
@@ -75,6 +90,12 @@ export interface SlackAppDeps {
   llm?: LlmProvider;
   /** Tag volunteer onboarding rows as demo data. */
   isDemo?: boolean;
+  /** SLA compression multiplier (config.slaMultiplier); stamped onto Assigned/Reassigned. */
+  slaMultiplier?: number;
+  /** Post a reassignment card (fresh top-3) to #relay-dispatch. Wired in src/server.ts from
+   * buildDriftCallbacks so the button handlers and the drift sweep share one implementation.
+   * Undefined disables the auto-reassign side effects (e.g. drift-less tests). */
+  proposeReassign?: (need: ProjectedNeed, excludeVolunteerId?: string) => Promise<void>;
 }
 
 const DEFAULT_INTAKE_NAME = 'relay-intake';
@@ -153,6 +174,22 @@ function readViewUser(body: unknown): { id: string; name: string } {
   const id = typeof u?.id === 'string' ? u.id : '';
   const name = (typeof u?.name === 'string' && u.name) || (typeof u?.username === 'string' && u.username) || id;
   return { id, name };
+}
+
+/** A per-submission discriminator for a view_submission (the view id/hash), so the two
+ * delivery EvidenceAttached events collapse on redelivery but distinct submissions stay
+ * distinct. Falls back to a fresh uuid when the view carries no id. */
+function readViewId(view: unknown): string {
+  const v = view as { id?: unknown; hash?: unknown };
+  if (typeof v?.id === 'string' && v.id !== '') return v.id;
+  if (typeof v?.hash === 'string' && v.hash !== '') return v.hash;
+  return randomUUID();
+}
+
+/** Read the private_metadata (the round-tripped need id) off a view. */
+function readViewMetadata(view: unknown): string {
+  const pm = (view as { private_metadata?: unknown })?.private_metadata;
+  return typeof pm === 'string' ? pm : '';
 }
 
 const ROUND = (n: number): number => Math.round(n * 10000) / 10000;
@@ -244,6 +281,8 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
   // and ephemerals go through the notifier (its own Web client); the modal uses the
   // interaction's own client (views.open needs the request's trigger_id).
 
+  const slaMultiplier = deps.slaMultiplier ?? 1;
+
   const resolvePublicId = async (needId: string): Promise<string> => {
     if (deps.store === undefined) return needId;
     return (await deps.store.getPublicId(needId)) ?? needId;
@@ -255,6 +294,25 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       await deps.notifier.postEphemeral({ channel: ctx.channel, user: ctx.user, text });
     } catch (err) {
       logger.debug({ err }, 'error ephemeral failed');
+    }
+  };
+
+  // Re-render a nudge DM in place after the volunteer taps a button: same heading, an ack
+  // line, no more buttons. Best-effort — a failed chat.update never breaks the transition.
+  const ackNudge = async (needId: string, body: unknown, ack: NudgeAck): Promise<void> => {
+    const ref = readCardRef(body);
+    if (ref === null) return;
+    const need = await deps.service.getNeed(needId);
+    if (need === null) return;
+    const publicId = await resolvePublicId(needId);
+    try {
+      await deps.notifier.updateMessage(
+        ref,
+        `${publicId} update`,
+        buildNudgeBlocks(need, publicId, 'at_risk', { ack }),
+      );
+    } catch (err) {
+      logger.debug({ err, need_id: needId }, 'nudge DM update failed');
     }
   };
 
@@ -380,20 +438,27 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     // on its next natural render. A needId→cardRef index is a documented integrator seam.
   });
 
-  // Assign a picked volunteer (human) → CLAIMED, bump their load, and update the card.
+  // Assign a picked volunteer (human) → CLAIMED, stamp the SLA clock, bump their load, and
+  // update the card. The obligation's sla_due_at is computed from the per-type SLA table
+  // compressed by config.slaMultiplier (§F4) so the drift sweep can chase it.
   app.action(new RegExp(`^${ASSIGN_PICK_ACTION}:`), async ({ ack, body, action }) => {
     await ack();
     const { id: packed } = parseActionId(readActionId(action));
     const { needId, volunteerId } = parseAssignTarget(packed);
     const ctx = readBodyContext(body);
     if (!needId || !volunteerId || !ctx.user) return;
+    const target = await deps.service.getNeed(needId);
+    if (target === null) return;
+    const nowMs = Date.now();
+    const slaDueAt = slaDueAtIso(target.type, target.severity, nowMs, slaMultiplier);
     const res = await deps.service.dispatch(
       needId,
-      { type: 'Assigned', payload: { volunteer_id: volunteerId, obligation_id: randomUUID(), sla_due_at: null } },
+      { type: 'Assigned', payload: { volunteer_id: volunteerId, obligation_id: randomUUID(), sla_due_at: slaDueAt } },
       {
         actor: { type: 'human', id: ctx.user },
-        at: new Date().toISOString(),
+        at: new Date(nowMs).toISOString(),
         idempotencyKey: needEventKey(needId, 'Assigned', interactionId(body, action)),
+        now: nowMs,
       },
     );
     if (res.status === 'rejected' || res.status === 'conflict') {
@@ -448,6 +513,383 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     } catch (err) {
       logger.error({ err, need_id: needId }, 'audit log write failed for contact reveal');
     }
+  });
+
+  // --- Drift handlers (Jul 8) -------------------------------------------------
+  // The volunteer's nudge-DM replies + the coordinator's one-click reassignment. Each reads
+  // body.user.id as the (human) actor; the ledger gates decide, and side effects run post-ack.
+
+  // "On my way" → EnRouteReported → IN_PROGRESS; acknowledge in the DM.
+  app.action(new RegExp(`^${ENROUTE_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const ctx = readBodyContext(body);
+    if (!needId || !ctx.user) return;
+    const res = await deps.service.dispatch(
+      needId,
+      { type: 'EnRouteReported', payload: {} },
+      {
+        actor: { type: 'human', id: ctx.user },
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'EnRouteReported', interactionId(body, action)),
+      },
+    );
+    if (res.status === 'rejected' || res.status === 'conflict') {
+      await notifyError(ctx, `Couldn't update that delivery (${res.code ?? res.status}).`);
+      return;
+    }
+    await ackNudge(needId, body, 'en_route');
+  });
+
+  // "Delayed" → Nudged{kind:'delayed'}; on the 2nd delay, auto-surface a reassignment card (a
+  // human still commits the actual Reassigned by clicking it). delays_count is derived from
+  // the log, so a fresh key per click keeps each delay distinct.
+  app.action(new RegExp(`^${DELAYED_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const ctx = readBodyContext(body);
+    if (!needId || !ctx.user) return;
+    const res = await deps.service.dispatch(
+      needId,
+      { type: 'Nudged', payload: { kind: 'delayed' } },
+      {
+        actor: { type: 'human', id: ctx.user },
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'Nudged', `delayed:${interactionId(body, action)}`),
+      },
+    );
+    if (res.status === 'rejected' || res.status === 'conflict') {
+      await notifyError(ctx, `Couldn't record that delay (${res.code ?? res.status}).`);
+      return;
+    }
+    await ackNudge(needId, body, 'delayed');
+    const events = await deps.service.getEvents(needId);
+    const delays = events.filter((e) => e.type === 'Nudged' && e.payload.kind === 'delayed').length;
+    if (res.status === 'applied' && delays >= 2 && deps.proposeReassign !== undefined) {
+      const need = res.need ?? (await deps.service.getNeed(needId));
+      if (need !== null) {
+        try {
+          await deps.proposeReassign(need);
+        } catch (err) {
+          logger.error({ err, need_id: needId }, 'delayed: proposeReassign failed');
+        }
+      }
+    }
+  });
+
+  // "Release" → ClaimReleased → OPEN, then immediately propose a fresh reassignment: the hero
+  // one-click hand-off. Decrements the releasing volunteer's load; excludes them from the slate.
+  app.action(new RegExp(`^${RELEASE_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const ctx = readBodyContext(body);
+    if (!needId || !ctx.user) return;
+    const before = await deps.service.getNeed(needId);
+    const res = await deps.service.dispatch(
+      needId,
+      { type: 'ClaimReleased', payload: { volunteer_id: ctx.user, reason: 'volunteer_released' } },
+      {
+        actor: { type: 'human', id: ctx.user },
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'ClaimReleased', interactionId(body, action)),
+      },
+    );
+    if (res.status === 'rejected' || res.status === 'conflict') {
+      await notifyError(ctx, `Couldn't release that need (${res.code ?? res.status}).`);
+      return;
+    }
+    if (res.status === 'applied' && before?.assigned_volunteer_id) {
+      await deps.volunteerStore.incrementLoad(before.assigned_volunteer_id, -1);
+    }
+    await ackNudge(needId, body, 'released');
+    const need = res.need ?? (await deps.service.getNeed(needId));
+    if (res.status === 'applied' && need !== null && deps.proposeReassign !== undefined) {
+      try {
+        await deps.proposeReassign(need, ctx.user);
+      } catch (err) {
+        logger.error({ err, need_id: needId }, 'release: proposeReassign failed');
+      }
+    }
+  });
+
+  // Coordinator one-click reassignment from a proposal card → the obligation moves to the new
+  // volunteer with a fresh SLA. Reassigned when the need is still held (CLAIMED/IN_PROGRESS/
+  // REOPENED); Assigned when it was released back to OPEN — both land in CLAIMED, both human.
+  app.action(new RegExp(`^${REASSIGN_PICK_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const { id: packed } = parseActionId(readActionId(action));
+    const { needId, volunteerId } = parseAssignTarget(packed);
+    const ctx = readBodyContext(body);
+    if (!needId || !volunteerId || !ctx.user) return;
+    const need = await deps.service.getNeed(needId);
+    if (need === null) return;
+    const prevVolunteer = need.assigned_volunteer_id;
+    const held = need.state === 'CLAIMED' || need.state === 'IN_PROGRESS' || need.state === 'REOPENED';
+    const nowMs = Date.now();
+    const slaDueAt = slaDueAtIso(need.type, need.severity, nowMs, slaMultiplier);
+    const command = held
+      ? ({
+          type: 'Reassigned',
+          payload: {
+            to_volunteer_id: volunteerId,
+            from_volunteer_id: prevVolunteer ?? undefined,
+            obligation_id: randomUUID(),
+            sla_due_at: slaDueAt,
+          },
+        } as const)
+      : ({
+          type: 'Assigned',
+          payload: { volunteer_id: volunteerId, obligation_id: randomUUID(), sla_due_at: slaDueAt },
+        } as const);
+    const res = await deps.service.dispatch(needId, command, {
+      actor: { type: 'human', id: ctx.user },
+      at: new Date(nowMs).toISOString(),
+      idempotencyKey: needEventKey(needId, command.type, interactionId(body, action)),
+      now: nowMs,
+    });
+    if (res.status === 'rejected' || res.status === 'conflict') {
+      await notifyError(ctx, `Couldn't reassign that need (${res.code ?? res.status}).`);
+      return;
+    }
+    if (res.status === 'applied') {
+      await deps.volunteerStore.incrementLoad(volunteerId, 1);
+      if (held && prevVolunteer) await deps.volunteerStore.incrementLoad(prevVolunteer, -1);
+    }
+    const vol = await deps.volunteerStore.getBySlackUser(volunteerId);
+    const name = vol?.display_name ?? volunteerId;
+    const ref = readCardRef(body);
+    const updated = res.need ?? (await deps.service.getNeed(needId));
+    if (ref !== null && updated !== null) {
+      const publicId = await resolvePublicId(needId);
+      const events = await deps.service.getEvents(needId);
+      await deps.notifier.updateCard(ref, { needId, publicId }, updated, {
+        events,
+        extraBlocks: [context(`🔄 *Reassigned to ${escapeMrkdwn(name)}* — fresh SLA clock started.`)],
+      });
+    }
+  });
+
+  // --- Evidence / verification handlers (Jul 8) -------------------------------
+  // The F5 close loop. Mark delivered opens the evidence modal; its submission attaches L1
+  // (photo + locality) → DELIVERED_UNVERIFIED and posts a recipient-confirm prompt; recipient
+  // (or coordinator-substitute) confirmation adds L2; the coordinator's sign-off adds L3 and,
+  // ONLY when meetsVerificationPolicy holds, Verifies then Closes. Every consequential step
+  // (sign-off / verify / close) passes a HUMAN actor; evidence attaches store references only,
+  // never beneficiary content (zero-copy, invariant #5).
+
+  // Re-render a need's dispatch card in place with its current evidence/verification state
+  // (the packet + badge + closed banner are part of the card once it is a delivery state).
+  const renderEvidenceCard = async (needId: string, body: unknown, prefetched?: ProjectedNeed): Promise<void> => {
+    const ref = readCardRef(body);
+    if (ref === null) return;
+    const need = prefetched ?? (await deps.service.getNeed(needId));
+    if (need === null) return;
+    const publicId = await resolvePublicId(needId);
+    const events = await deps.service.getEvents(needId);
+    try {
+      await deps.notifier.updateCard(ref, { needId, publicId }, need, { events });
+    } catch (err) {
+      logger.debug({ err, need_id: needId }, 'evidence card update failed');
+    }
+  };
+
+  // "Mark delivered" → open the evidence-capture modal (needs the interaction's trigger_id).
+  app.action(new RegExp(`^${MARK_DELIVERED_ACTION}:`), async ({ ack, body, action, client }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const triggerId = (body as { trigger_id?: string }).trigger_id;
+    if (!needId || !triggerId) return;
+    try {
+      const openArgs = {
+        trigger_id: triggerId,
+        view: buildDeliveryModal(needId),
+      } as unknown as Parameters<typeof client.views.open>[0];
+      await client.views.open(openArgs);
+    } catch (err) {
+      logger.error({ err, need_id: needId }, 'open delivery modal failed');
+    }
+  });
+
+  // Delivery evidence submitted → attach L1 (photo when referenced, locality when confirmed) →
+  // DELIVERED_UNVERIFIED, then post a recipient-confirm prompt so the loop can be closed. The
+  // card refreshes on its next interaction (the needId→cardRef index is a documented seam).
+  app.view(DELIVERY_CALLBACK_ID, async ({ ack, view, body }) => {
+    await ack();
+    const needId = readViewMetadata(view);
+    const user = readViewUser(body);
+    if (needId === '' || user.id === '') return;
+    const submission = parseDeliverySubmission(view as unknown as SlackView);
+    const disc = readViewId(view);
+    try {
+      let attached = false;
+      if (submission.photoRef !== undefined) {
+        await deps.service.dispatch(
+          needId,
+          {
+            type: 'EvidenceAttached',
+            payload: { kind: 'photo', evidence_id: submission.photoRef, meta: { via: 'modal' } },
+          },
+          {
+            actor: { type: 'agent', id: user.id },
+            at: new Date().toISOString(),
+            idempotencyKey: needEventKey(needId, 'EvidenceAttached', `photo:${disc}`),
+          },
+        );
+        attached = true;
+      }
+      if (submission.localityConfirmed) {
+        await deps.service.dispatch(
+          needId,
+          { type: 'EvidenceAttached', payload: { kind: 'locality_confirm', meta: { via: 'modal' } } },
+          {
+            actor: { type: 'agent', id: user.id },
+            at: new Date().toISOString(),
+            idempotencyKey: needEventKey(needId, 'EvidenceAttached', `locality:${disc}`),
+          },
+        );
+        attached = true;
+      }
+      if (attached) {
+        const publicId = await resolvePublicId(needId);
+        await deps.notifier.postToDispatch(
+          `${publicId} delivery reported — confirm receipt`,
+          buildRecipientConfirmPrompt(needId),
+        );
+      }
+    } catch (err) {
+      logger.error({ err, need_id: needId }, 'delivery evidence submission failed');
+    }
+  });
+
+  // Recipient confirmation (recipient self-confirm OR coordinator substitute) → RecipientConfirmed
+  // (+ an evidence ref) → L2. Neither is human-gated; the substitute path is attributed to the
+  // clicking coordinator and logs a reason.
+  const confirmRecipient = async (
+    needId: string,
+    ctx: { channel?: string; user?: string },
+    body: unknown,
+    action: unknown,
+    by: 'recipient' | 'coordinator_substitute',
+  ): Promise<void> => {
+    const user = ctx.user;
+    if (!user) return;
+    const disc = interactionId(body, action);
+    const actor =
+      by === 'coordinator_substitute' ? ({ type: 'human', id: user } as const) : ({ type: 'agent', id: user } as const);
+    const rc = await deps.service.dispatch(
+      needId,
+      {
+        type: 'RecipientConfirmed',
+        payload:
+          by === 'coordinator_substitute'
+            ? { confirmed_by: 'coordinator_substitute', reason: 'coordinator_confirmed_on_behalf' }
+            : { confirmed_by: 'recipient' },
+      },
+      { actor, at: new Date().toISOString(), idempotencyKey: needEventKey(needId, 'RecipientConfirmed', disc) },
+    );
+    if (rc.status === 'rejected' || rc.status === 'conflict') {
+      await notifyError(ctx, `Couldn't confirm receipt (${rc.code ?? rc.status}).`);
+      return;
+    }
+    await deps.service.dispatch(
+      needId,
+      { type: 'EvidenceAttached', payload: { kind: 'recipient_confirm', meta: { via: by } } },
+      {
+        actor,
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'EvidenceAttached', `recipient:${disc}`),
+      },
+    );
+    if (by === 'coordinator_substitute') {
+      logger.info({ need_id: needId, by: user }, 'recipient confirmation recorded via coordinator substitute');
+    }
+    await renderEvidenceCard(needId, body);
+  };
+
+  app.action(new RegExp(`^${RECIPIENT_CONFIRM_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const ctx = readBodyContext(body);
+    if (!needId || !ctx.user) return;
+    await confirmRecipient(needId, ctx, body, action, 'recipient');
+  });
+
+  app.action(new RegExp(`^${RECIPIENT_SUBSTITUTE_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const ctx = readBodyContext(body);
+    if (!needId || !ctx.user) return;
+    await confirmRecipient(needId, ctx, body, action, 'coordinator_substitute');
+  });
+
+  // Coordinator "Sign off & close" → attach L3 (coordinator_signoff) + CoordinatorSignedOff
+  // (human). Then, ONLY when meetsVerificationPolicy holds, Verified (human) → Closed (human).
+  // If the packet is short, ack with the missing kinds; a premature Verified the engine would
+  // reject anyway is avoided (and handled defensively).
+  app.action(new RegExp(`^${SIGNOFF_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const ctx = readBodyContext(body);
+    if (!needId || !ctx.user) return;
+    const disc = interactionId(body, action);
+    await deps.service.dispatch(
+      needId,
+      { type: 'EvidenceAttached', payload: { kind: 'coordinator_signoff', meta: { via: 'signoff' } } },
+      {
+        actor: { type: 'agent', id: 'relay-evidence' },
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'EvidenceAttached', `signoff:${disc}`),
+      },
+    );
+    const signed = await deps.service.dispatch(
+      needId,
+      { type: 'CoordinatorSignedOff', payload: {} },
+      {
+        actor: { type: 'human', id: ctx.user },
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'CoordinatorSignedOff', disc),
+      },
+    );
+    if (signed.status === 'rejected' || signed.status === 'conflict') {
+      await notifyError(ctx, `Couldn't sign off (${signed.code ?? signed.status}).`);
+      return;
+    }
+    const need = signed.need ?? (await deps.service.getNeed(needId));
+    if (need === null) return;
+    const vstatus = verificationStatus(need);
+    if (!vstatus.meetsPolicy) {
+      const missing = vstatus.missing.map((k) => EVIDENCE_KIND_LABEL[k]).join(', ');
+      await notifyError(
+        ctx,
+        `Can't close yet — missing: ${missing || 'more evidence'}. The packet must be complete to verify.`,
+      );
+      await renderEvidenceCard(needId, body, need);
+      return;
+    }
+    const verified = await deps.service.dispatch(
+      needId,
+      { type: 'Verified', payload: {} },
+      {
+        actor: { type: 'human', id: ctx.user },
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'Verified', disc),
+      },
+    );
+    if (verified.status === 'rejected' || verified.status === 'conflict') {
+      await notifyError(ctx, `Couldn't verify (${verified.code ?? verified.status}).`);
+      await renderEvidenceCard(needId, body);
+      return;
+    }
+    await deps.service.dispatch(
+      needId,
+      { type: 'Closed', payload: {} },
+      {
+        actor: { type: 'human', id: ctx.user },
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'Closed', disc),
+      },
+    );
+    await renderEvidenceCard(needId, body);
   });
 
   // /relay volunteer → onboarding modal · /relay volunteers → roster.

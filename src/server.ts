@@ -1,6 +1,11 @@
 import { WebClient } from '@slack/web-api';
 import pg from 'pg';
 import { config } from './config';
+import { buildDriftCallbacks } from './drift/callbacks';
+import { runDriftSweep } from './drift/driftEngine';
+import { BullmqScheduler } from './drift/scheduler/bullmqScheduler';
+import { InMemoryScheduler } from './drift/scheduler/inMemoryScheduler';
+import type { Scheduler } from './drift/scheduler/scheduler';
 import { createContactVault } from './ingest/contactVaultStore';
 import { MemoryDedupeStore, PgDedupeStore } from './ingest/dedupe';
 import { SlackNotifier } from './ingest/notifier';
@@ -94,6 +99,35 @@ async function main(): Promise<void> {
     queue = new InlineQueue(jobHandler);
   }
 
+  // Drift side effects (SLA nudges + reassignment cards), built once and shared by the
+  // Slack drift handlers and the sweep worker so both use one reassignment implementation.
+  const resolvePublicId = async (needId: string): Promise<string> => (await store.getPublicId(needId)) ?? needId;
+  const { notifyNudge, proposeReassign } = buildDriftCallbacks({
+    service,
+    notifier,
+    volunteerStore,
+    localities,
+    resolvePublicId,
+    llm: rationaleLlm,
+  });
+
+  // The 60s drift worker (§F4): durable BullMQ tick when REDIS_URL is set, else the timer-free
+  // in-memory scheduler (which only fires when a caller advances its virtual clock — the demo
+  // runner does; live-without-Redis therefore has no autonomous drift, by design).
+  const scheduler: Scheduler = config.redisUrl
+    ? new BullmqScheduler({ redisUrl: config.redisUrl })
+    : new InMemoryScheduler();
+  scheduler.start(async (now) => {
+    try {
+      await runDriftSweep({ service, listNeeds: (n) => service.listNeeds(n), notifyNudge, proposeReassign, now });
+    } catch (err) {
+      logger.error({ err }, 'drift sweep failed');
+    }
+  });
+  if (!config.redisUrl) {
+    logger.warn('relay: no REDIS_URL — drift worker will not tick autonomously (set REDIS_URL for live SLA drift)');
+  }
+
   const { start } = buildSlackApp({
     botToken,
     signingSecret,
@@ -115,12 +149,15 @@ async function main(): Promise<void> {
     auditLog,
     llm: rationaleLlm,
     isDemo: false,
+    slaMultiplier: config.slaMultiplier,
+    proposeReassign,
   });
 
   logger.info(
     {
       store: pool ? 'postgres' : 'memory',
       queue: config.redisUrl ? 'bullmq' : 'inline',
+      drift: config.redisUrl ? 'bullmq' : 'inmemory',
       extractor: extractor.name,
       vault: vault ? 'on' : 'off',
     },

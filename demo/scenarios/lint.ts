@@ -288,6 +288,10 @@ function lintScenario(): LintResult {
   if (evidenceExp) resolveNeed(evidenceExp.params.need_ref, 'close_requires_evidence');
   else errors.push(`missing expectation: evidence/close_requires_evidence`);
 
+  const heroExp = expectByAssert(scenario, 'hero_e2e');
+  if (heroExp) resolveNeed(heroExp.params.need_ref, 'hero_e2e');
+  else errors.push(`missing expectation: evidence/hero_e2e`);
+
   // --- Hero wiring: release -> reassign target the same claimed need ------
   const releaseReply = replies.find((r) => r.reply === 'release');
   if (releaseReply) {

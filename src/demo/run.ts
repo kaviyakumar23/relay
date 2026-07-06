@@ -3,6 +3,8 @@ import { parseScenario } from '../../demo/scenarios/schema';
 import {
   buildHermeticAssembly,
   evaluateDedupe,
+  evaluateDrift,
+  evaluateEvidence,
   evaluateMatch,
   evaluateSkeleton,
   evaluateTriage,
@@ -13,10 +15,11 @@ import {
 // `npm run demo` — the judge-runnable hermetic storyboard (BUILD-DOC §16.2/§16.3).
 // It plays flood-1.yaml through the real intake pipeline (no Slack, no infra, zero
 // env): 14 intake messages → 14 NeedCreated events → P-1 (heuristic) extraction →
-// 14 dispatch cards. Asserts the walking-skeleton count AND the extraction-backed
-// triage expectations (NEEDS_REVIEW routing + the critical severity floor). Prints
-// PASS/FAIL per evaluated expectation, SKIP (with reason) for the rest, and exits
-// non-zero on any failure. CLI entrypoint — console.error only.
+// 14 dispatch cards → triage/dedupe/match → the drift/reassign hero arc (SLA nudge →
+// overdue → release → reassignment) → the evidence finale (deliver → recipient confirm →
+// coordinator sign-off → Verified → Closed, with a pre-policy Verified proven rejected).
+// Prints PASS/FAIL per evaluated expectation, SKIP (with reason) for the rest, and exits
+// non-zero on any failure. CLI: console.error only.
 
 const SCENARIO_URL = new URL('../../demo/scenarios/flood-1.yaml', import.meta.url);
 
@@ -40,6 +43,8 @@ async function main(): Promise<number> {
     ...(await evaluateTriage(scenario, assembly, run)),
     ...(await evaluateDedupe(scenario, assembly, run)),
     ...(await evaluateMatch(scenario, assembly, run)),
+    ...(await evaluateDrift(scenario, assembly, run)),
+    ...(await evaluateEvidence(scenario, assembly, run)),
   ];
   let failures = 0;
   for (const r of results) {

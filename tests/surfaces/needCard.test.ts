@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildHermeticAssembly, injectIntake } from '../../src/demo/driver';
-import { emptyFlags, type ProjectedNeed } from '../../src/ledger/types';
+import { type EvidenceKind, emptyFlags, type NeedState, type ProjectedNeed } from '../../src/ledger/types';
 import { dispatchCard } from '../../src/surfaces/needCard';
 import { parseActionId, type SlackBlock } from '../../src/surfaces/primitives';
 
@@ -125,6 +125,105 @@ describe('dispatchCard — pre-extraction fallback', () => {
     const dump = jsonOf(blocks);
     expect((blocks[0] as { text?: { text?: string } }).text?.text).toContain('UNCLASSIFIED');
     expect(dump).toContain('extraction pending');
+    expect(dump).not.toContain('need_reveal');
+  });
+});
+
+describe('dispatchCard — evidence / verification flow (§F5)', () => {
+  /** A committed (post-triage) need in the given delivery state, with the given evidence and
+   * a vaulted contact so the reveal-visibility rule can be exercised. */
+  function deliveringNeed(state: NeedState, kinds: EvidenceKind[]): ProjectedNeed {
+    return {
+      need_id: 'need_e',
+      state,
+      type: 'food',
+      severity: 'high',
+      locality_id: 7,
+      location_text: 'Velachery',
+      people_count: 5,
+      languages: ['ta-en'],
+      source: { permalink: 'https://relay.demo/x/p9' },
+      confidence: { type: 'stated', contact: 'stated' },
+      merged_into: null,
+      assigned_volunteer_id: 'SEED_U12',
+      obligation_id: 'ob_1',
+      sla_due_at: '2026-07-04T00:30:00.000Z',
+      evidence: kinds.map((kind, i) => ({ kind, at: `2026-07-04T00:1${i}:00.000Z` })),
+      flags: emptyFlags(),
+      state_version: 5,
+      history_count: 8,
+      created_at: '2026-07-04T00:00:00.000Z',
+      updated_at: '2026-07-04T00:20:00.000Z',
+    };
+  }
+
+  const actionIdsOf = (blocks: SlackBlock[]): Array<{ action: string; id: string }> =>
+    blocks
+      .filter((b) => (b as { type?: string }).type === 'actions')
+      .flatMap((b) => (b as { elements: Array<{ action_id: string }> }).elements)
+      .map((el) => parseActionId(el.action_id));
+
+  it('offers "Mark delivered" (and keeps reveal) while CLAIMED/IN_PROGRESS', () => {
+    for (const state of ['CLAIMED', 'IN_PROGRESS'] as const) {
+      const ids = actionIdsOf(dispatchCard('N-0001', deliveringNeed(state, [])));
+      expect(ids).toContainEqual({ action: 'need_mark_delivered', id: 'need_e' });
+      expect(ids).toContainEqual({ action: 'need_reveal', id: 'need_e' });
+    }
+  });
+
+  it('shows the evidence packet + a policy-gated (locked) sign-off on DELIVERED_UNVERIFIED', () => {
+    const blocks = dispatchCard('N-0001', deliveringNeed('DELIVERED_UNVERIFIED', ['photo', 'locality_confirm']));
+    const dump = jsonOf(blocks);
+    expect(dump).toContain('Evidence packet');
+    // high severity needs L3: the sign-off is locked and names what is still missing.
+    expect(dump).toContain('Sign-off locked');
+    expect(dump).toContain('recipient confirmation');
+    const ids = actionIdsOf(blocks);
+    expect(ids).toContainEqual({ action: 'need_signoff', id: 'need_e' });
+    // still pre-close: reveal is available.
+    expect(ids).toContainEqual({ action: 'need_reveal', id: 'need_e' });
+  });
+
+  it('enables the sign-off on DELIVERED_UNVERIFIED once L1+L2 are present (missing only sign-off)', () => {
+    const blocks = dispatchCard(
+      'N-0001',
+      deliveringNeed('DELIVERED_UNVERIFIED', ['photo', 'locality_confirm', 'recipient_confirm']),
+    );
+    const signoffRow = blocks.find(
+      (b) =>
+        (b as { type?: string }).type === 'actions' &&
+        (b as { elements: Array<{ action_id: string; style?: string }> }).elements.some((el) =>
+          el.action_id.startsWith('need_signoff:'),
+        ),
+    ) as { elements: Array<{ style?: string }> };
+    expect(signoffRow.elements[0]?.style).toBe('primary');
+    expect(jsonOf(blocks)).not.toContain('Sign-off locked');
+  });
+
+  it('renders the "Verified · Closed" banner + full packet and hides contact controls when CLOSED', () => {
+    const blocks = dispatchCard(
+      'N-0001',
+      deliveringNeed('CLOSED', ['photo', 'locality_confirm', 'recipient_confirm', 'coordinator_signoff']),
+    );
+    const dump = jsonOf(blocks);
+    expect(dump).toContain('Verified · Closed');
+    expect(dump).toContain('Verification: L3');
+    // The contact controls (reveal button + encrypted note) hide once the loop is closed.
+    expect(dump).not.toContain('need_reveal');
+    expect(dump).not.toContain('stored encrypted');
+    // No "Mark delivered" / sign-off action lingers on a closed need.
+    expect(dump).not.toContain('need_mark_delivered');
+    expect(dump).not.toContain('need_signoff');
+  });
+
+  it('shows a plain "Verified" banner (contact hidden) when VERIFIED but not yet CLOSED', () => {
+    const blocks = dispatchCard(
+      'N-0001',
+      deliveringNeed('VERIFIED', ['photo', 'locality_confirm', 'recipient_confirm', 'coordinator_signoff']),
+    );
+    const dump = jsonOf(blocks);
+    expect(dump).toContain('Verified');
+    expect(dump).not.toContain('Verified · Closed');
     expect(dump).not.toContain('need_reveal');
   });
 });

@@ -1,11 +1,17 @@
-import { randomBytes } from 'node:crypto';
-import type { Expectation, Scenario } from '../../demo/scenarios/schema';
+import { randomBytes, randomUUID } from 'node:crypto';
+import type { Expectation, Scenario, VolunteerClaimStep } from '../../demo/scenarios/schema';
+import { buildDriftCallbacks } from '../drift/callbacks';
+import { runDriftSweep } from '../drift/driftEngine';
+import { InMemoryScheduler } from '../drift/scheduler/inMemoryScheduler';
+import { slaDueAtIso } from '../drift/sla';
 import { MemoryDedupeStore } from '../ingest/dedupe';
 import { handleIntakeMessage, type IntakeOutcome } from '../ingest/intakeHandler';
 import { RecordingNotifier } from '../ingest/notifier';
-import { isEvent } from '../ledger/events';
+import { isEvent, type NeedEvent } from '../ledger/events';
 import { needEventKey } from '../ledger/idempotency';
 import { NeedService } from '../ledger/needService';
+import { DEFAULT_RISK_WINDOW_MS } from '../ledger/projection';
+import { meetsVerificationPolicy } from '../ledger/stateMachine';
 import { InMemoryEventStore } from '../ledger/store/memoryStore';
 import type { ProjectedNeed } from '../ledger/types';
 import { InMemoryContactVault } from '../lib/vault';
@@ -167,14 +173,13 @@ export async function runScenario(scenario: Scenario, a: HermeticAssembly): Prom
       skippedSteps.push({
         kind: step.kind,
         ref: `${step.volunteer_ref}->${step.need_ref}`,
-        reason:
-          'self-claim needs the need OPEN + the drift capability (Jul 8); match is demonstrated via the match expectation',
+        reason: 'driven by the drift evaluation (evaluateDrift): claim → SLA → nudge, not inline in runScenario',
       });
     } else {
       skippedSteps.push({
         kind: step.kind,
         ref: `${step.volunteer_ref}:${step.reply}`,
-        reason: 'release → reassign lands with the drift capability (Jul 8)',
+        reason: 'driven by the drift evaluation (evaluateDrift): release → reassignment proposal → reassigned',
       });
     }
   }
@@ -425,9 +430,444 @@ export async function evaluateMatch(
   return results;
 }
 
+/**
+ * Drive + evaluate the drift/reassign hero arc for the drift need (m01): confirm → self-claim
+ * (stamping a COMPRESSED SLA) → advance the in-memory scheduler's virtual clock so the sweep
+ * fires at-risk (a DM nudge) then overdue (a reassignment card) → the volunteer releases →
+ * a fresh reassignment proposal appears → the coordinator hands the obligation to a second
+ * volunteer. Every assertion reads the ledger / recorded notifications — nothing is faked.
+ * The scheduler + drift callbacks are the SAME seams live mode wires (src/server.ts).
+ *
+ * Note on the post-release reassignment: ClaimReleased returns the need to OPEN, from which the
+ * legal "commit a volunteer" transition is Assigned (not Reassigned, which applies from a still
+ * -held CLAIMED/IN_PROGRESS/REOPENED need) — so the demo reassigns via Assigned. The live
+ * need_reassign_pick handler is state-aware and uses whichever the current state allows.
+ */
+export async function evaluateDrift(
+  scenario: Scenario,
+  a: HermeticAssembly,
+  run: ScenarioRunResult,
+): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const nudgeExp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'nudge_before_overdue' }> => e.assert === 'nudge_before_overdue',
+  );
+  const reassignExp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'reassign_after_release' }> => e.assert === 'reassign_after_release',
+  );
+  const driftRef = (nudgeExp ?? reassignExp)?.params.need_ref;
+  if (driftRef === undefined) return results;
+
+  const needs0 = await a.service.listNeeds();
+  const seed = mapNeedsByStep(needs0, run).get(driftRef);
+  const claimStep = scenario.steps.find(
+    (s): s is VolunteerClaimStep => s.kind === 'volunteer_claim' && s.need_ref === driftRef,
+  );
+  const claimVol = claimStep?.volunteer_ref;
+
+  const fail = (assert: 'nudge_before_overdue' | 'reassign_after_release', detail: string): void => {
+    results.push({ capability: 'drift', assert, pass: false, detail });
+  };
+  if (seed === undefined || claimVol === undefined) {
+    if (nudgeExp) fail('nudge_before_overdue', `drift need ${driftRef} or its claim step not found`);
+    if (reassignExp) fail('reassign_after_release', `drift need ${driftRef} or its claim step not found`);
+    return results;
+  }
+  const needId = seed.need_id;
+
+  const resolvePublicId = async (id: string): Promise<string> => (await a.store.getPublicId(id)) ?? id;
+  const { notifyNudge, proposeReassign } = buildDriftCallbacks({
+    service: a.service,
+    notifier: a.notifier,
+    volunteerStore: a.volunteerStore,
+    localities: a.localities,
+    resolvePublicId,
+  });
+
+  const claimAt = Math.max(BASE_CLOCK_MS, ...needs0.map((n) => Date.parse(n.created_at))) + 120_000;
+
+  // Confirm triage → OPEN (human) if still pre-open.
+  const preClaim = (await a.service.getNeed(needId, claimAt)) ?? seed;
+  if (preClaim.state === 'TRIAGED' || preClaim.state === 'NEEDS_REVIEW') {
+    await a.service.dispatch(
+      needId,
+      { type: 'TriageConfirmed', payload: {} },
+      {
+        actor: { type: 'human', id: 'demo-coordinator' },
+        at: new Date(claimAt).toISOString(),
+        idempotencyKey: needEventKey(needId, 'TriageConfirmed', 'drift'),
+        now: claimAt,
+      },
+    );
+  }
+
+  // Self-claim (F3), stamping the compressed SLA the sweep will chase.
+  const open = (await a.service.getNeed(needId, claimAt)) ?? preClaim;
+  const slaIso = slaDueAtIso(open.type, open.severity, claimAt, scenario.sla_multiplier);
+  const claimed = await a.service.dispatch(
+    needId,
+    { type: 'Claimed', payload: { volunteer_id: claimVol, obligation_id: randomUUID(), sla_due_at: slaIso } },
+    {
+      actor: { type: 'human', id: claimVol },
+      at: new Date(claimAt).toISOString(),
+      idempotencyKey: needEventKey(needId, 'Claimed', 'drift'),
+      now: claimAt,
+    },
+  );
+  if (claimed.status !== 'applied') {
+    if (nudgeExp) fail('nudge_before_overdue', `self-claim did not apply (${claimed.status})`);
+    if (reassignExp) fail('reassign_after_release', `self-claim did not apply (${claimed.status})`);
+    return results;
+  }
+  await a.volunteerStore.incrementLoad(claimVol, 1);
+  const dueMs = Date.parse(slaIso);
+
+  // The in-memory scheduler drives the sweep on a virtual clock — the demo's on-cue drift.
+  const scheduler = new InMemoryScheduler();
+  scheduler.start(async (now) => {
+    await runDriftSweep({
+      service: a.service,
+      listNeeds: (n) => a.service.listNeeds(n),
+      notifyNudge,
+      proposeReassign,
+      now,
+    });
+  });
+
+  // 1) A sweep INSIDE the risk window, before due → Nudged('at_risk') + a DM nudge.
+  const preDue = Math.max(1, Math.min(Math.floor((dueMs - claimAt) / 2), DEFAULT_RISK_WINDOW_MS - 1));
+  await scheduler.runDue(dueMs - preDue);
+  // 2) A sweep PAST due → Nudged('overdue') + a reassignment proposal.
+  await scheduler.runDue(dueMs + 1_000);
+
+  if (nudgeExp) {
+    const events = await a.service.getEvents(needId);
+    const atRiskNudged = events.some((e) => isEvent(e, 'Nudged') && e.payload.kind === 'at_risk');
+    const dm = a.notifier.dms.some((d) => d.userId === claimVol);
+    const pass = atRiskNudged && dm;
+    results.push({
+      capability: 'drift',
+      assert: 'nudge_before_overdue',
+      pass,
+      detail: pass
+        ? `Nudged('at_risk') fired before due and DM'd ${claimVol}`
+        : `at_risk nudge=${atRiskNudged}, DM=${dm}`,
+    });
+  }
+
+  if (reassignExp) {
+    // 3) The volunteer releases → OPEN, then a fresh reassignment proposal is posted.
+    const releaseAt = dueMs + 2_000;
+    const released = await a.service.dispatch(
+      needId,
+      { type: 'ClaimReleased', payload: { volunteer_id: claimVol, reason: 'volunteer_released' } },
+      {
+        actor: { type: 'human', id: claimVol },
+        at: new Date(releaseAt).toISOString(),
+        idempotencyKey: needEventKey(needId, 'ClaimReleased', 'drift'),
+        now: releaseAt,
+      },
+    );
+    await a.volunteerStore.incrementLoad(claimVol, -1);
+    const openAgain = (await a.service.getNeed(needId, releaseAt)) ?? open;
+    const postsBefore = a.notifier.dispatchPosts.length;
+    await proposeReassign(openAgain, claimVol);
+    const proposalPosted = a.notifier.dispatchPosts.length > postsBefore;
+
+    // 4) The coordinator one-click reassigns to the top fresh candidate (from OPEN → Assigned).
+    const scoreNeed: ScoreNeed = {
+      type: openAgain.type,
+      localityId: openAgain.locality_id,
+      languages: openAgain.languages,
+    };
+    const vols = (await a.volunteerStore.list()).filter((v) => v.slack_user_id !== claimVol);
+    const newVol = topN(scoreNeed, vols, a.localities, 3)[0]?.volunteer.slack_user_id;
+    let finalVol: string | null = null;
+    let reassigned = false;
+    if (newVol !== undefined) {
+      const reassignAt = dueMs + 3_000;
+      const newSla = slaDueAtIso(openAgain.type, openAgain.severity, reassignAt, scenario.sla_multiplier);
+      const rr = await a.service.dispatch(
+        needId,
+        { type: 'Assigned', payload: { volunteer_id: newVol, obligation_id: randomUUID(), sla_due_at: newSla } },
+        {
+          actor: { type: 'human', id: 'demo-coordinator' },
+          at: new Date(reassignAt).toISOString(),
+          idempotencyKey: needEventKey(needId, 'Assigned', 'drift-reassign'),
+          now: reassignAt,
+        },
+      );
+      if (rr.status === 'applied') await a.volunteerStore.incrementLoad(newVol, 1);
+      const finalNeed = await a.service.getNeed(needId, reassignAt);
+      finalVol = finalNeed?.assigned_volunteer_id ?? null;
+      reassigned =
+        finalNeed !== null &&
+        finalVol === newVol &&
+        newVol !== claimVol &&
+        (finalNeed.state === 'CLAIMED' || finalNeed.state === 'IN_PROGRESS');
+    }
+    const releaseApplied = released.status === 'applied';
+    const pass = releaseApplied && proposalPosted && reassigned;
+    results.push({
+      capability: 'drift',
+      assert: 'reassign_after_release',
+      pass,
+      detail: pass
+        ? `released by ${claimVol} → proposal posted → reassigned to ${finalVol}`
+        : `release=${releaseApplied}, proposal=${proposalPosted}, reassignedTo=${finalVol ?? 'none'}`,
+    });
+  }
+
+  return results;
+}
+
+/** An ordered-subsequence match over an event log: every predicate must be satisfied, in
+ * order, by some event (gaps allowed). Proves the hero chain happened in the right sequence. */
+function matchesChain(events: NeedEvent[], steps: ReadonlyArray<(e: NeedEvent) => boolean>): boolean {
+  let i = 0;
+  for (const e of events) {
+    if (i < steps.length && steps[i]?.(e)) i += 1;
+  }
+  return i === steps.length;
+}
+
+/** The event types that are consequential human gates (§6.2). The engine already rejects a
+ * non-human actor on these, so any that made it into the log MUST carry a human actor — the
+ * hero assertion reads that back from the ledger to prove the invariant end to end. */
+const HUMAN_GATED_TYPES: ReadonlySet<string> = new Set([
+  'TriageConfirmed',
+  'DuplicateConfirmed',
+  'Assigned',
+  'Reassigned',
+  'CoordinatorSignedOff',
+  'Verified',
+  'Closed',
+  'Cancelled',
+]);
+
+/**
+ * Drive + evaluate the evidence/verification HERO FINALE on the drift need (m01) — the demo's
+ * hero moment (§F5). REQUIRES evaluateDrift to have run first: it continues from the post-reassign
+ * obligation held by the SECOND volunteer and drives the delivery → close chain on the SAME
+ * ledger, reading every assertion back from the event log (never fabricated):
+ *   1. deliver: EvidenceAttached(photo) + EvidenceAttached(locality_confirm) → DELIVERED_UNVERIFIED (L1)
+ *   2. CLOSE-GATING PROOF: a Verified attempted here (high-severity need, only L1 present) is
+ *      REJECTED with INSUFFICIENT_EVIDENCE — the engine will not close on a partial packet.
+ *   3. recipient confirm (+ EvidenceAttached recipient_confirm) → L2
+ *   4. coordinator sign-off: EvidenceAttached(coordinator_signoff) + CoordinatorSignedOff (human) → L3
+ *   5. Verified (human) → VERIFIED, then Closed (human) → CLOSED, on the now-complete packet.
+ * Evaluates BOTH evidence expectations (close_requires_evidence + hero_e2e) from this one drive.
+ * Human-gated steps carry a human actor; evidence attaches / recipient confirm are agent events.
+ */
+export async function evaluateEvidence(
+  scenario: Scenario,
+  a: HermeticAssembly,
+  run: ScenarioRunResult,
+): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const closeExp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'close_requires_evidence' }> => e.assert === 'close_requires_evidence',
+  );
+  const heroExp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'hero_e2e' }> => e.assert === 'hero_e2e',
+  );
+  const ref = (heroExp ?? closeExp)?.params.need_ref;
+  if (ref === undefined) return results;
+
+  const fail = (assert: 'close_requires_evidence' | 'hero_e2e', detail: string): void => {
+    results.push({ capability: 'evidence', assert, pass: false, detail });
+  };
+
+  const seed = mapNeedsByStep(await a.service.listNeeds(), run).get(ref);
+  if (seed === undefined) {
+    if (closeExp) fail('close_requires_evidence', `need ${ref} not found`);
+    if (heroExp) fail('hero_e2e', `need ${ref} not found`);
+    return results;
+  }
+  const needId = seed.need_id;
+
+  // Post-drift the obligation is held by a SECOND volunteer (state CLAIMED, fresh SLA). Anchor
+  // the evidence timeline just after the reassign; the F5 transitions are all time-gate-free.
+  const held = await a.service.getNeed(needId);
+  const holder = held?.assigned_volunteer_id ?? null;
+  if (held === null || holder === null || (held.state !== 'CLAIMED' && held.state !== 'IN_PROGRESS')) {
+    const detail = `${ref} is ${held?.state ?? 'missing'} (holder ${holder ?? 'none'}) — the evidence arc needs the post-reassign claimed obligation (run evaluateDrift first)`;
+    if (closeExp) fail('close_requires_evidence', detail);
+    if (heroExp) fail('hero_e2e', detail);
+    return results;
+  }
+
+  let clock = Date.parse(held.updated_at) + 1000;
+  const at = (): string => {
+    const v = new Date(clock).toISOString();
+    clock += 1000;
+    return v;
+  };
+  const coordinator = 'demo-coordinator';
+  const recipient = 'demo-recipient';
+
+  // 1) DELIVER — the second volunteer attaches L1 (photo + locality). Evidence stores REFERENCES
+  // only (a Slack file id), never beneficiary content (zero-copy, invariant #5).
+  await a.service.dispatch(
+    needId,
+    { type: 'EvidenceAttached', payload: { kind: 'photo', evidence_id: 'F_DEMO_PHOTO', meta: { via: 'demo' } } },
+    {
+      actor: { type: 'agent', id: holder },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'EvidenceAttached', 'photo'),
+    },
+  );
+  await a.service.dispatch(
+    needId,
+    { type: 'EvidenceAttached', payload: { kind: 'locality_confirm', meta: { via: 'demo' } } },
+    {
+      actor: { type: 'agent', id: holder },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'EvidenceAttached', 'locality'),
+    },
+  );
+
+  // 2) CLOSE-GATING PROOF — Verified with only L1 present is REJECTED (high need requires L3).
+  const premature = await a.service.dispatch(
+    needId,
+    { type: 'Verified', payload: {} },
+    {
+      actor: { type: 'human', id: coordinator },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'Verified', 'premature'),
+    },
+  );
+  const rejectedEarly = premature.status === 'rejected' && premature.code === 'INSUFFICIENT_EVIDENCE';
+
+  // 3) RECIPIENT CONFIRM (+ evidence ref) → L2. Not human-gated: the recipient closes their own loop.
+  await a.service.dispatch(
+    needId,
+    { type: 'RecipientConfirmed', payload: { confirmed_by: 'recipient' } },
+    {
+      actor: { type: 'agent', id: recipient },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'RecipientConfirmed', 'demo'),
+    },
+  );
+  await a.service.dispatch(
+    needId,
+    { type: 'EvidenceAttached', payload: { kind: 'recipient_confirm', meta: { via: 'demo' } } },
+    {
+      actor: { type: 'agent', id: recipient },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'EvidenceAttached', 'recipient'),
+    },
+  );
+
+  // 4) COORDINATOR SIGN-OFF (+ evidence ref) → L3. CoordinatorSignedOff is human-gated.
+  await a.service.dispatch(
+    needId,
+    { type: 'EvidenceAttached', payload: { kind: 'coordinator_signoff', meta: { via: 'demo' } } },
+    {
+      actor: { type: 'agent', id: 'relay-evidence' },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'EvidenceAttached', 'signoff'),
+    },
+  );
+  await a.service.dispatch(
+    needId,
+    { type: 'CoordinatorSignedOff', payload: {} },
+    {
+      actor: { type: 'human', id: coordinator },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'CoordinatorSignedOff', 'demo'),
+    },
+  );
+
+  // 5) VERIFY (human) → VERIFIED, then CLOSE (human) → CLOSED, on the now-complete L3 packet.
+  const preVerify = await a.service.getNeed(needId);
+  const policyMet = preVerify !== null && meetsVerificationPolicy(preVerify);
+  const verified = await a.service.dispatch(
+    needId,
+    { type: 'Verified', payload: {} },
+    { actor: { type: 'human', id: coordinator }, at: at(), idempotencyKey: needEventKey(needId, 'Verified', 'final') },
+  );
+  const closed = await a.service.dispatch(
+    needId,
+    { type: 'Closed', payload: {} },
+    { actor: { type: 'human', id: coordinator }, at: at(), idempotencyKey: needEventKey(needId, 'Closed', 'final') },
+  );
+
+  // --- Read the truth back from the ledger (never fabricate a pass) -----------
+  const finalNeed = await a.service.getNeed(needId);
+  const events = await a.service.getEvents(needId);
+  const kinds = new Set(finalNeed?.evidence.map((e) => e.kind) ?? []);
+  const requiredKinds = closeExp?.params.required ?? [
+    'photo',
+    'locality_confirm',
+    'recipient_confirm',
+    'coordinator_signoff',
+  ];
+  const packetComplete = requiredKinds.every((k) => kinds.has(k));
+  const isClosed = finalNeed?.state === 'CLOSED';
+  const closeApplied = closed.status === 'applied';
+  const verifyApplied = verified.status === 'applied';
+
+  // Render the closed card so the demo surfaces the evidence packet + "Verified · Closed" badge.
+  const card = a.notifier.cards.find((c) => c.needId === needId);
+  if (card !== undefined && finalNeed !== null) {
+    await a.notifier.updateCard(
+      { channel: card.channel, ts: card.ts },
+      { needId, publicId: card.publicId },
+      finalNeed,
+      {
+        events,
+      },
+    );
+  }
+
+  if (closeExp) {
+    const pass = rejectedEarly && policyMet && verifyApplied && closeApplied && packetComplete;
+    results.push({
+      capability: 'evidence',
+      assert: 'close_requires_evidence',
+      pass,
+      detail: pass
+        ? `close blocked at L1 (rejected: INSUFFICIENT_EVIDENCE), then verified+closed once ${requiredKinds.join(', ')} were all present`
+        : `rejectedEarly=${rejectedEarly}, policyMet=${policyMet}, verified=${verified.status}, closed=${closed.status}, packet=[${[...kinds].join(', ')}]`,
+    });
+  }
+
+  if (heroExp) {
+    // The full hero chain, in order, as an ordered subsequence of the event log.
+    const chainOk = matchesChain(events, [
+      (e) => isEvent(e, 'Claimed'),
+      (e) => isEvent(e, 'Nudged') && e.payload.kind === 'at_risk',
+      (e) => isEvent(e, 'ClaimReleased'),
+      (e) => isEvent(e, 'Assigned') || isEvent(e, 'Reassigned'),
+      (e) => isEvent(e, 'EvidenceAttached') && e.payload.kind === 'photo',
+      (e) => isEvent(e, 'EvidenceAttached') && e.payload.kind === 'locality_confirm',
+      (e) => isEvent(e, 'RecipientConfirmed'),
+      (e) => isEvent(e, 'CoordinatorSignedOff'),
+      (e) => isEvent(e, 'Verified'),
+      (e) => isEvent(e, 'Closed'),
+    ]);
+    // No auto-merge: neither a DuplicateConfirmed on the log nor a merged_into on the projection.
+    const autoMerged = events.some((e) => isEvent(e, 'DuplicateConfirmed')) || finalNeed?.merged_into !== null;
+    // Every human-gated event that made it into the log carries a human actor.
+    const gateViolations = events.filter((e) => HUMAN_GATED_TYPES.has(e.type) && e.actor.type !== 'human');
+    const pass = chainOk && isClosed && packetComplete && rejectedEarly && !autoMerged && gateViolations.length === 0;
+    results.push({
+      capability: 'evidence',
+      assert: 'hero_e2e',
+      pass,
+      detail: pass
+        ? `claim→at-risk nudge→release→reassign→deliver(photo+locality)→recipient confirm→sign-off→Verified→Closed; complete packet, no auto-merge, all ${events.filter((e) => HUMAN_GATED_TYPES.has(e.type)).length} human-gated steps human-signed, premature Verified rejected`
+        : `chain=${chainOk}, closed=${isClosed}, packet=${packetComplete}, rejectedEarly=${rejectedEarly}, autoMerged=${autoMerged}, gateViolations=${gateViolations.map((e) => e.type).join(',') || 'none'}`,
+    });
+  }
+
+  return results;
+}
+
 /** Asserts the driver evaluates today: the walking skeleton, extraction-backed triage,
- * dedupe auto-detection, and the deterministic match slate. Everything else is a
- * documented SKIP. */
+ * dedupe auto-detection, the deterministic match slate, the drift/reassign hero arc, and
+ * the evidence/verification finale. Everything else is a documented SKIP. */
 const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'needs_created_count',
   'needs_review_count',
@@ -435,6 +875,10 @@ const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'exact_contact_auto_link',
   'duplicate_proposed_pairs',
   'candidates_suggested',
+  'nudge_before_overdue',
+  'reassign_after_release',
+  'close_requires_evidence',
+  'hero_e2e',
 ]);
 
 export interface SkippedExpectation {
@@ -447,8 +891,6 @@ function skipReason(exp: Expectation): string {
   if (exp.assert === 'distinct_needs_after_dedupe') {
     return 'dedupe auto-detects duplicates (DuplicateProposed), but the merge itself is a human-gated DuplicateConfirmed — the hermetic demo does not auto-merge, so all 14 needs remain';
   }
-  if (exp.capability === 'drift') return 'drift engine (SLA timers, nudges, reassignment) lands Jul 8';
-  if (exp.capability === 'evidence') return 'evidence/verification gating lands with F5';
   if (exp.capability === 'sitrep') return 'sitrep narration lands with F6';
   return 'capability not built yet';
 }

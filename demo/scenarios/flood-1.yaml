@@ -234,11 +234,24 @@ expectations:
 
   # evidence — closing m01 is blocked until the full high-severity packet
   # (photo + locality + recipient confirm + coordinator sign-off) is present.
+  # The evidence finale is driver-driven (evaluateEvidence): the SECOND volunteer
+  # (post-reassign) delivers with photo + locality, a premature Verified is REJECTED,
+  # then recipient confirm + coordinator sign-off complete the packet → Verified → Closed.
   - capability: evidence
     assert: close_requires_evidence
     params:
       need_ref: m01
       required: [photo, locality_confirm, recipient_confirm, coordinator_signoff]
+
+  # evidence — the full HERO chain end to end on m01, read from the ledger:
+  #   claim → at-risk nudge → release → reassign → deliver(photo+locality) →
+  #   recipient confirm → coordinator sign-off → Verified → Closed, with a complete
+  #   evidence packet, NO auto-merge, every human-gated step carrying a human actor,
+  #   and a pre-policy Verified proven REJECTED (close-gating).
+  - capability: evidence
+    assert: hero_e2e
+    params:
+      need_ref: m01
 
   # sitrep — every {{stat:*}} token in the narrative must equal the SQL truth.
   - capability: sitrep

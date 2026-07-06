@@ -90,6 +90,7 @@ export type ScenarioStep = z.infer<typeof stepSchema>;
 //     · reassign_after_release     { need_ref }          release → reassign proposal
 //   evidence  — verification gating (§F5).
 //     · close_requires_evidence    { need_ref, required[] } close blocked sans packet
+//     · hero_e2e                    { need_ref }            full chain claim→…→Closed proven
 //   sitrep    — narrated aggregates (§F6).
 //     · stats_match_ledger         { }                  every {{stat}} == SQL truth
 //
@@ -107,7 +108,7 @@ export const ASSERT_CATALOG = {
   dedupe: ['exact_contact_auto_link', 'duplicate_proposed_pairs'],
   match: ['candidates_suggested'],
   drift: ['nudge_before_overdue', 'reassign_after_release'],
-  evidence: ['close_requires_evidence'],
+  evidence: ['close_requires_evidence', 'hero_e2e'],
   sitrep: ['stats_match_ledger'],
 } as const satisfies Record<Capability, readonly string[]>;
 
@@ -152,6 +153,11 @@ export const expectationSchema = z.discriminatedUnion('assert', [
     capability: z.literal('evidence'),
     assert: z.literal('close_requires_evidence'),
     params: z.object({ need_ref: z.string().min(1), required: z.array(evidenceKinds).min(1) }),
+  }),
+  z.object({
+    capability: z.literal('evidence'),
+    assert: z.literal('hero_e2e'),
+    params: z.object({ need_ref: z.string().min(1) }),
   }),
   z.object({
     capability: z.literal('sitrep'),

@@ -14,6 +14,12 @@ import { actions, button, context, escapeMrkdwn, header, type SlackBlock, sectio
  * The handler does parseActionId(id) → { action, id } then parseAssignTarget(id). */
 export const ASSIGN_PICK_ACTION = 'need_assign_pick';
 
+/** The Reassign-pick action (drift/F4). Same packed `<needId>|<volunteerId>` entity id
+ * as ASSIGN_PICK_ACTION — encodeAssignTarget / parseAssignTarget round-trip both — but a
+ * distinct action id so the drift reassignment card routes to the Reassigned handler
+ * instead of the initial-assign one. Rendered by buildMatchBlocks via opts.assignAction. */
+export const REASSIGN_PICK_ACTION = 'need_reassign_pick';
+
 /** Pack a need id + volunteer id into one action entity id (split on the first '|'). */
 export function encodeAssignTarget(needId: string, volunteerId: string): string {
   return `${needId}|${volunteerId}`;
@@ -47,24 +53,34 @@ export function scoreBar(score: number): string {
   return `${'▓'.repeat(filled)}${'░'.repeat(BAR_CELLS - filled)}`;
 }
 
-function candidateBlocks(need: MatchNeed, c: RankedCandidate): SlackBlock[] {
+function candidateBlocks(need: MatchNeed, c: RankedCandidate, assignAction: string): SlackBlock[] {
   const pct = Math.round(Math.min(1, Math.max(0, c.score)) * 100);
   const name = escapeMrkdwn(c.volunteer.display_name);
   const line = escapeMrkdwn(c.rationale);
   return [
     section(`*${name}*  \`${scoreBar(c.score)}\` ${pct}%\n${line}`),
-    actions([
-      button('Assign', ASSIGN_PICK_ACTION, encodeAssignTarget(need.needId, c.volunteer.slack_user_id), 'primary'),
-    ]),
+    actions([button('Assign', assignAction, encodeAssignTarget(need.needId, c.volunteer.slack_user_id), 'primary')]),
   ];
+}
+
+/** Render options for buildMatchBlocks. */
+export interface MatchBlocksOptions {
+  /** The Assign button's action id (default ASSIGN_PICK_ACTION; REASSIGN_PICK_ACTION for drift). */
+  assignAction?: string;
 }
 
 /**
  * Build the match card blocks for a need and its ranked candidates. Pass the already
  * top-N'd, rationale-attached list (scoreVolunteers → topN → matchRationale). An empty
- * list renders a "no match" note instead of buttons.
+ * list renders a "no match" note instead of buttons. `opts.assignAction` swaps the
+ * Assign button's action id so the same slate drives initial-assign or reassignment.
  */
-export function buildMatchBlocks(need: MatchNeed, ranked: RankedCandidate[]): SlackBlock[] {
+export function buildMatchBlocks(
+  need: MatchNeed,
+  ranked: RankedCandidate[],
+  opts: MatchBlocksOptions = {},
+): SlackBlock[] {
+  const assignAction = opts.assignAction ?? ASSIGN_PICK_ACTION;
   const idLabel = need.publicId ? `${need.publicId} · ` : '';
   const where = need.localityText ? ` in ${escapeMrkdwn(need.localityText)}` : '';
   const blocks: SlackBlock[] = [
@@ -75,7 +91,7 @@ export function buildMatchBlocks(need: MatchNeed, ranked: RankedCandidate[]): Sl
     blocks.push(section('_No available volunteers matched this need. Widen radius or check the roster._'));
     return blocks;
   }
-  for (const c of ranked) blocks.push(...candidateBlocks(need, c));
+  for (const c of ranked) blocks.push(...candidateBlocks(need, c, assignAction));
   blocks.push(context('_Assign is a human decision — clicking it commits the volunteer and starts the SLA clock._'));
   return blocks;
 }
