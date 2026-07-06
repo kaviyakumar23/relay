@@ -93,11 +93,23 @@ export type ScenarioStep = z.infer<typeof stepSchema>;
 //     · hero_e2e                    { need_ref }            full chain claim→…→Closed proven
 //   sitrep    — narrated aggregates (§F6).
 //     · stats_match_ledger         { }                  every {{stat}} == SQL truth
+//   report    — verified-impact narration + number-integrity/PII gates (§F7).
+//     · integrity_guard            { }                  a hallucinated number → template fallback
+//     · no_pii                     { }                  generated report Markdown is PII-clean
 //
 // `pairs` are ORDERED [duplicate_ref, original_ref]: the first is the later
 // message that should merge into / propose-merge with the second.
 
-export const capabilitySchema = z.enum(['skeleton', 'triage', 'dedupe', 'match', 'drift', 'evidence', 'sitrep']);
+export const capabilitySchema = z.enum([
+  'skeleton',
+  'triage',
+  'dedupe',
+  'match',
+  'drift',
+  'evidence',
+  'sitrep',
+  'report',
+]);
 export type Capability = z.infer<typeof capabilitySchema>;
 
 /** Documentation + runtime catalog of which asserts each capability owns.
@@ -110,6 +122,7 @@ export const ASSERT_CATALOG = {
   drift: ['nudge_before_overdue', 'reassign_after_release'],
   evidence: ['close_requires_evidence', 'hero_e2e'],
   sitrep: ['stats_match_ledger'],
+  report: ['integrity_guard', 'no_pii'],
 } as const satisfies Record<Capability, readonly string[]>;
 
 const countParams = z.object({ count: z.number().int().nonnegative() });
@@ -162,6 +175,16 @@ export const expectationSchema = z.discriminatedUnion('assert', [
   z.object({
     capability: z.literal('sitrep'),
     assert: z.literal('stats_match_ledger'),
+    params: z.object({}).optional(),
+  }),
+  z.object({
+    capability: z.literal('report'),
+    assert: z.literal('integrity_guard'),
+    params: z.object({}).optional(),
+  }),
+  z.object({
+    capability: z.literal('report'),
+    assert: z.literal('no_pii'),
     params: z.object({}).optional(),
   }),
 ]);

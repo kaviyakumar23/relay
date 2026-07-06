@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import type { Expectation, Scenario, VolunteerClaimStep } from '../../demo/scenarios/schema';
+import type { Expectation, IntakeMessageStep, Scenario, VolunteerClaimStep } from '../../demo/scenarios/schema';
 import { buildDriftCallbacks } from '../drift/callbacks';
 import { runDriftSweep } from '../drift/driftEngine';
 import { InMemoryScheduler } from '../drift/scheduler/inMemoryScheduler';
@@ -13,12 +13,19 @@ import { NeedService } from '../ledger/needService';
 import { DEFAULT_RISK_WINDOW_MS } from '../ledger/projection';
 import { meetsVerificationPolicy } from '../ledger/stateMachine';
 import { InMemoryEventStore } from '../ledger/store/memoryStore';
-import type { ProjectedNeed } from '../ledger/types';
+import { type NeedState, type ProjectedNeed, TERMINAL_STATES } from '../ledger/types';
 import { InMemoryContactVault } from '../lib/vault';
+import { MockLlm } from '../llm/mock';
+import { buildSitrepRequest } from '../llm/prompts/p5-sitrep';
 import { matchRationale } from '../match/rationale';
 import { type LocalityCoord, type ScoreNeed, topN } from '../match/scorer';
 import { loadLocalityCoords, loadSeedVolunteers } from '../match/seedData';
 import { InMemoryVolunteerStore } from '../match/volunteerStore';
+import { computeSitrepStats } from '../narrate/aggregate';
+import { assertNoPii } from '../narrate/redaction';
+import { generateReport } from '../narrate/report';
+import { generateSitrep } from '../narrate/sitrep';
+import { buildTokenMap, narrateWithIntegrity, validateNumbers } from '../narrate/statTokens';
 import { HeuristicExtractor } from '../pipeline/extract';
 import { makeIntakeJobHandler } from '../pipeline/intakeJob';
 import { InlineQueue } from '../pipeline/queue';
@@ -865,9 +872,141 @@ export async function evaluateEvidence(
   return results;
 }
 
+/** The pre-claim "open work queue" states, recounted here INDEPENDENTLY of computeSitrepStats
+ * so the sitrep assertion is a genuine cross-check, not a tautology. */
+const OPEN_STATE_SET: ReadonlySet<NeedState> = new Set<NeedState>([
+  'NEW',
+  'TRIAGED',
+  'OPEN',
+  'MATCH_SUGGESTED',
+  'REOPENED',
+]);
+
+/** A reference "now" comfortably after every event, so drift flags + "today" are stable. */
+function referenceNow(needs: ProjectedNeed[]): number {
+  return Math.max(BASE_CLOCK_MS, ...needs.map((n) => Date.parse(n.updated_at))) + 60_000;
+}
+
+/**
+ * Evaluate the sitrep expectation (§F6): generateSitrep over the live hermetic ledger, then
+ * ASSERT its headline figures equal an INDEPENDENT recount of listNeeds (numbers-match-ledger),
+ * and that the (deterministic, no-LLM) narrative contains no stray number. Reads the ledger
+ * truth — never fabricates a pass.
+ */
+export async function evaluateSitrep(scenario: Scenario, a: HermeticAssembly): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const exp = scenario.expectations.find((e) => e.assert === 'stats_match_ledger');
+  if (exp === undefined) return results;
+
+  const now = referenceNow(await a.service.listNeeds());
+  const needs = await a.service.listNeeds(now);
+
+  // Independent recount straight off the projection (NOT via computeSitrepStats).
+  const recount = {
+    totalActive: needs.filter((n) => !TERMINAL_STATES.has(n.state)).length,
+    open: needs.filter((n) => OPEN_STATE_SET.has(n.state)).length,
+    verified: needs.filter((n) => n.state === 'VERIFIED').length,
+    closed: needs.filter((n) => n.state === 'CLOSED').length,
+    needsReview: needs.filter((n) => n.state === 'NEEDS_REVIEW').length,
+  };
+
+  const sitrep = await generateSitrep({ service: a.service, now }); // no llm → deterministic template
+  const s = sitrep.stats;
+  const mismatches: string[] = [];
+  const check = (name: string, got: number, want: number): void => {
+    if (got !== want) mismatches.push(`${name}: sitrep=${got} ledger=${want}`);
+  };
+  check('total_active', s.totalActive, recount.totalActive);
+  check('open', s.open, recount.open);
+  check('verified', s.verified, recount.verified);
+  check('closed', s.closed, recount.closed);
+  check('needs_review', s.needsReview, recount.needsReview);
+
+  // The narrative must contain ONLY ledger numbers (the {{stat:*}} allowlist).
+  const strays = validateNumbers(sitrep.text, buildTokenMap(s.stats).allowedNumbers);
+  if (!strays.ok) mismatches.push(`narrative stray number(s): ${strays.strays.join(', ')}`);
+
+  const pass = mismatches.length === 0;
+  results.push({
+    capability: 'sitrep',
+    assert: 'stats_match_ledger',
+    pass,
+    detail: pass
+      ? `sitrep headline figures equal an independent recount of listNeeds (active=${recount.totalActive}, open=${recount.open}, verified=${recount.verified}, closed=${recount.closed}, review=${recount.needsReview}); narrative has no stray number`
+      : mismatches.join('; '),
+  });
+  return results;
+}
+
+/**
+ * Evaluate the report guarantees (§F7):
+ *   · integrity_guard — a MockLlm that ALWAYS emits a hallucinated figure is rejected by
+ *     narrateWithIntegrity and the output falls back to the deterministic template with NO
+ *     stray number: a fabricated figure can never reach a sitrep/report.
+ *   · no_pii — generateReport over the seeded ledger produces PII-clean Markdown (assertNoPii
+ *     ok) that contains none of the seed phone-number digit strings.
+ * Both read real outputs — nothing is faked.
+ */
+export async function evaluateReport(scenario: Scenario, a: HermeticAssembly): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const integrityExp = scenario.expectations.find((e) => e.assert === 'integrity_guard');
+  const noPiiExp = scenario.expectations.find((e) => e.assert === 'no_pii');
+  const now = referenceNow(await a.service.listNeeds());
+
+  if (integrityExp !== undefined) {
+    const stats = computeSitrepStats(await a.service.listNeeds(now), now).stats;
+    // A figure that is NOT on the board (the demo tops out around a dozen needs).
+    const HALLUCINATION = 90210;
+    const strayLlm = new MockLlm(() => ({
+      narrative: `A staggering ${HALLUCINATION} people were reached {{stat:total_active}} active on the board.`,
+    }));
+    const out = await narrateWithIntegrity({
+      stats,
+      kind: 'sitrep',
+      llm: strayLlm,
+      buildRequest: buildSitrepRequest,
+    });
+    const fellBack = out.source === 'template';
+    const noStray = !out.text.includes(String(HALLUCINATION));
+    const pass = fellBack && noStray && out.attempts >= 1;
+    results.push({
+      capability: 'report',
+      assert: 'integrity_guard',
+      pass,
+      detail: pass
+        ? `hallucinated ${HALLUCINATION} rejected across ${out.attempts} attempt(s) → template fallback; fabricated figure never reached the output`
+        : `source=${out.source}, attempts=${out.attempts}, containsHallucination=${!noStray}`,
+    });
+  }
+
+  if (noPiiExp !== undefined) {
+    const resolvePublicId = async (id: string): Promise<string> => (await a.store.getPublicId(id)) ?? id;
+    const report = await generateReport({ service: a.service, period: { label: 'all time' }, now, resolvePublicId });
+    const gate = assertNoPii(report.markdown);
+    // Independent grep: none of the seed phone digit strings survive into the Markdown.
+    const seedContacts = scenario.steps
+      .filter((step): step is IntakeMessageStep => step.kind === 'intake_message' && step.contact !== undefined)
+      .map((step) => (step.contact ?? '').replace(/\D+/g, ''))
+      .filter((d) => d.length > 0);
+    const mdDigits = report.markdown.replace(/\D+/g, '');
+    const leaked = seedContacts.filter((d) => mdDigits.includes(d));
+    const pass = gate.ok && leaked.length === 0;
+    results.push({
+      capability: 'report',
+      assert: 'no_pii',
+      pass,
+      detail: pass
+        ? `report Markdown is PII-clean (assertNoPii ok) and contains none of the ${seedContacts.length} seed phone number(s)`
+        : `assertNoPii.ok=${gate.ok} (${gate.hits.length} hit(s)); leaked ${leaked.length} seed number(s)`,
+    });
+  }
+  return results;
+}
+
 /** Asserts the driver evaluates today: the walking skeleton, extraction-backed triage,
- * dedupe auto-detection, the deterministic match slate, the drift/reassign hero arc, and
- * the evidence/verification finale. Everything else is a documented SKIP. */
+ * dedupe auto-detection, the deterministic match slate, the drift/reassign hero arc, the
+ * evidence/verification finale, and the sitrep/report narration guarantees (F6/F7).
+ * Everything else is a documented SKIP. */
 const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'needs_created_count',
   'needs_review_count',
@@ -879,6 +1018,9 @@ const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'reassign_after_release',
   'close_requires_evidence',
   'hero_e2e',
+  'stats_match_ledger',
+  'integrity_guard',
+  'no_pii',
 ]);
 
 export interface SkippedExpectation {
@@ -891,7 +1033,6 @@ function skipReason(exp: Expectation): string {
   if (exp.assert === 'distinct_needs_after_dedupe') {
     return 'dedupe auto-detects duplicates (DuplicateProposed), but the merge itself is a human-gated DuplicateConfirmed — the hermetic demo does not auto-merge, so all 14 needs remain';
   }
-  if (exp.capability === 'sitrep') return 'sitrep narration lands with F6';
   return 'capability not built yet';
 }
 

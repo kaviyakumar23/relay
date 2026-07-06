@@ -6,6 +6,8 @@ import {
   evaluateDrift,
   evaluateEvidence,
   evaluateMatch,
+  evaluateReport,
+  evaluateSitrep,
   evaluateSkeleton,
   evaluateTriage,
   runScenario,
@@ -17,7 +19,9 @@ import {
 // env): 14 intake messages → 14 NeedCreated events → P-1 (heuristic) extraction →
 // 14 dispatch cards → triage/dedupe/match → the drift/reassign hero arc (SLA nudge →
 // overdue → release → reassignment) → the evidence finale (deliver → recipient confirm →
-// coordinator sign-off → Verified → Closed, with a pre-policy Verified proven rejected).
+// coordinator sign-off → Verified → Closed, with a pre-policy Verified proven rejected) →
+// the sitrep/report narration guarantees (F6/F7: sitrep numbers == an independent ledger
+// recount; a hallucinated figure falls back to the template; the report Markdown is PII-clean).
 // Prints PASS/FAIL per evaluated expectation, SKIP (with reason) for the rest, and exits
 // non-zero on any failure. CLI: console.error only.
 
@@ -45,6 +49,8 @@ async function main(): Promise<number> {
     ...(await evaluateMatch(scenario, assembly, run)),
     ...(await evaluateDrift(scenario, assembly, run)),
     ...(await evaluateEvidence(scenario, assembly, run)),
+    ...(await evaluateSitrep(scenario, assembly)),
+    ...(await evaluateReport(scenario, assembly)),
   ];
   let failures = 0;
   for (const r of results) {

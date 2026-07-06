@@ -50,6 +50,8 @@ export interface Notifier {
   postDirect(userId: string, text: string, blocks: SlackBlock[]): Promise<CardRef>;
   /** Post an arbitrary block message to #relay-dispatch (e.g. a reassignment card). */
   postToDispatch(text: string, blocks: SlackBlock[]): Promise<CardRef>;
+  /** Post an arbitrary block message to a specific channel (e.g. a sitrep/report to #relay-hq). */
+  postToChannel(channel: string, text: string, blocks: SlackBlock[]): Promise<CardRef>;
   /** Re-render any posted message in place (nudge DM / reassignment card acknowledgement). */
   updateMessage(ref: CardRef, text: string, blocks: SlackBlock[]): Promise<void>;
 }
@@ -129,6 +131,11 @@ export class SlackNotifier implements Notifier {
     return { channel: res.channel ?? channel, ts: res.ts ?? '' };
   }
 
+  async postToChannel(channel: string, text: string, blocks: SlackBlock[]): Promise<CardRef> {
+    const res = await this.client.chat.postMessage({ channel, text, blocks });
+    return { channel: res.channel ?? channel, ts: res.ts ?? '' };
+  }
+
   async updateMessage(ref: CardRef, text: string, blocks: SlackBlock[]): Promise<void> {
     await this.client.chat.update({ channel: ref.channel, ts: ref.ts, text, blocks });
   }
@@ -173,6 +180,13 @@ export interface RecordedPost extends CardRef {
   blocks: SlackBlock[];
 }
 
+/** A recorded post to a named channel (sitrep/report to #relay-hq) — its ref, target channel,
+ * text + blocks. */
+export interface RecordedChannelPost extends CardRef {
+  text: string;
+  blocks: SlackBlock[];
+}
+
 /** A recorded in-place message update (nudge DM / reassignment card acknowledgement). */
 export interface RecordedMessageUpdate {
   ref: CardRef;
@@ -188,6 +202,7 @@ export class RecordingNotifier implements Notifier {
   readonly ephemerals: RecordedEphemeral[] = [];
   readonly dms: RecordedDm[] = [];
   readonly dispatchPosts: RecordedPost[] = [];
+  readonly channelPosts: RecordedChannelPost[] = [];
   readonly messageUpdates: RecordedMessageUpdate[] = [];
   private seq = 0;
 
@@ -235,6 +250,12 @@ export class RecordingNotifier implements Notifier {
   async postToDispatch(text: string, blocks: SlackBlock[]): Promise<CardRef> {
     const ref: CardRef = { channel: 'C_DISPATCH_REC', ts: `ts_${this.seq++}` };
     this.dispatchPosts.push({ ...ref, text, blocks });
+    return ref;
+  }
+
+  async postToChannel(channel: string, text: string, blocks: SlackBlock[]): Promise<CardRef> {
+    const ref: CardRef = { channel, ts: `ts_${this.seq++}` };
+    this.channelPosts.push({ ...ref, text, blocks });
     return ref;
   }
 

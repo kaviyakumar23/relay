@@ -56,7 +56,7 @@ async function main(): Promise<void> {
 
   // Shared, mutable channel roles — filled by app start(); the notifier reads the
   // dispatch id through the same object so it sees the resolved value.
-  const roles: MutableRoles = { intakeChannelId: '', dispatchChannelId: '' };
+  const roles: MutableRoles = { intakeChannelId: '', dispatchChannelId: '', hqChannelId: '' };
 
   // The notifier posts via its own Web client (independent of Bolt's receiver).
   const notifier = new SlackNotifier(new WebClient(botToken), () => roles.dispatchChannelId);
@@ -141,6 +141,7 @@ async function main(): Promise<void> {
     channelConfig: {
       intakeChannelId: process.env.RELAY_INTAKE_CHANNEL,
       dispatchChannelId: process.env.RELAY_DISPATCH_CHANNEL,
+      hqChannelId: process.env.RELAY_HQ_CHANNEL,
     },
     volunteerStore,
     localities,

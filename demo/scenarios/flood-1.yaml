@@ -256,3 +256,14 @@ expectations:
   # sitrep — every {{stat:*}} token in the narrative must equal the SQL truth.
   - capability: sitrep
     assert: stats_match_ledger
+
+  # report — the number-integrity guard: a MockLlm that emits a hallucinated figure
+  # must be rejected and the output must fall back to the deterministic template with
+  # no stray number — a fabricated figure can never reach a donor report.
+  - capability: report
+    assert: integrity_guard
+
+  # report — the F7 PII gate: a report generated over the seeded ledger is PII-clean
+  # (assertNoPii ok) and contains none of the seed phone digits.
+  - capability: report
+    assert: no_pii

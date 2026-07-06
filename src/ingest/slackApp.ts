@@ -13,7 +13,10 @@ import type { LlmProvider } from '../llm/provider';
 import { matchRationale } from '../match/rationale';
 import { type LocalityCoord, type ScoreNeed, topN } from '../match/scorer';
 import type { Volunteer, VolunteerStore } from '../match/volunteerStore';
+import { generateReport, parseReportPeriod } from '../narrate/report';
+import { generateSitrep } from '../narrate/sitrep';
 import type { PipelineQueue } from '../pipeline/queue';
+import { buildCanvasDocument, type CanvasWriteClient, writeCanvas } from '../surfaces/canvas';
 import { buildNudgeBlocks, DELAYED_ACTION, ENROUTE_ACTION, type NudgeAck, RELEASE_ACTION } from '../surfaces/driftCard';
 import {
   buildDeliveryModal,
@@ -53,6 +56,8 @@ import type { Notifier } from './notifier';
 export interface MutableRoles {
   intakeChannelId: string;
   dispatchChannelId: string;
+  /** #relay-hq — where sitreps/reports post. Falls back to dispatch when unresolved. */
+  hqChannelId: string;
 }
 
 export interface ChannelRoleConfig {
@@ -60,9 +65,12 @@ export interface ChannelRoleConfig {
   intakeChannelId?: string;
   /** RELAY_DISPATCH_CHANNEL override (a channel id). */
   dispatchChannelId?: string;
+  /** RELAY_HQ_CHANNEL override (a channel id). */
+  hqChannelId?: string;
   /** Fallback name lookup via conversations.list. */
   intakeChannelName?: string;
   dispatchChannelName?: string;
+  hqChannelName?: string;
 }
 
 export interface SlackAppDeps {
@@ -100,6 +108,7 @@ export interface SlackAppDeps {
 
 const DEFAULT_INTAKE_NAME = 'relay-intake';
 const DEFAULT_DISPATCH_NAME = 'relay-dispatch';
+const DEFAULT_HQ_NAME = 'relay-hq';
 
 /** Build a name→id map of every channel the bot can see (paginated). */
 async function channelsByName(client: WebClient): Promise<Map<string, string>> {
@@ -120,18 +129,17 @@ async function channelsByName(client: WebClient): Promise<Map<string, string>> {
   return map;
 }
 
-/** Resolve intake/dispatch channel ids (env override first, then name lookup). */
+/** Resolve intake/dispatch/hq channel ids (env override first, then name lookup). HQ falls
+ * back to dispatch when it can't be resolved (so sitreps still land somewhere). */
 async function resolveRoles(client: WebClient, roles: MutableRoles, cfg: ChannelRoleConfig): Promise<void> {
   const intakeId = cfg.intakeChannelId;
   const dispatchId = cfg.dispatchChannelId;
-  if (intakeId && dispatchId) {
-    roles.intakeChannelId = intakeId;
-    roles.dispatchChannelId = dispatchId;
-    return;
-  }
-  const byName = await channelsByName(client);
+  const hqId = cfg.hqChannelId;
+  const needsLookup = !intakeId || !dispatchId || !hqId;
+  const byName = needsLookup ? await channelsByName(client) : new Map<string, string>();
   roles.intakeChannelId = intakeId ?? byName.get(cfg.intakeChannelName ?? DEFAULT_INTAKE_NAME) ?? '';
   roles.dispatchChannelId = dispatchId ?? byName.get(cfg.dispatchChannelName ?? DEFAULT_DISPATCH_NAME) ?? '';
+  roles.hqChannelId = hqId ?? byName.get(cfg.hqChannelName ?? DEFAULT_HQ_NAME) ?? roles.dispatchChannelId;
 }
 
 /** Safely read an action_id off Bolt's (union-typed) action payload. */
@@ -208,6 +216,9 @@ export interface BuiltSlackApp {
   app: App;
   start: () => Promise<void>;
 }
+
+/** The structural slice of Bolt's slash-command `respond` the sitrep/report helpers use. */
+type SlashRespond = (message: { response_type?: 'ephemeral' | 'in_channel'; text: string }) => Promise<unknown>;
 
 /** Wire the Bolt app onto the intake pipeline. Returns start() to resolve channels
  * and boot the app (Socket Mode or HTTP). */
@@ -892,10 +903,81 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     await renderEvidenceCard(needId, body);
   });
 
-  // /relay volunteer → onboarding modal · /relay volunteers → roster.
+  // The channel sitreps/reports post to (#relay-hq, falling back to #relay-dispatch).
+  const hqChannel = (): string => deps.roles.hqChannelId || deps.roles.dispatchChannelId;
+
+  // /relay sitrep → post the live board snapshot (F6) to #relay-hq + best-effort Canvas.
+  const runSitrep = async (client: WebClient, respond: SlashRespond): Promise<void> => {
+    const channel = hqChannel();
+    if (channel === '') {
+      await respond({
+        response_type: 'ephemeral',
+        text: 'No HQ channel resolved — set RELAY_HQ_CHANNEL or invite the bot to #relay-hq / #relay-dispatch.',
+      });
+      return;
+    }
+    const sitrep = await generateSitrep({ service: deps.service, llm: deps.llm, now: Date.now() });
+    await deps.notifier.postToChannel(channel, sitrep.text, sitrep.blocks);
+    await writeCanvas(client as unknown as CanvasWriteClient, {
+      channelId: channel,
+      title: 'Relay sitrep',
+      markdown: buildCanvasDocument(sitrep.blocks).markdown,
+    });
+    await respond({ response_type: 'ephemeral', text: `Sitrep posted to <#${channel}> (source: ${sitrep.source}).` });
+  };
+
+  // /relay report [period] → post a verified-impact summary (F7) + the Markdown artifact to
+  // #relay-hq + best-effort Canvas. The Markdown is the primary artifact; upload + Canvas are
+  // both best-effort and never block the summary.
+  const runReport = async (client: WebClient, respond: SlashRespond, arg: string): Promise<void> => {
+    const channel = hqChannel();
+    if (channel === '') {
+      await respond({
+        response_type: 'ephemeral',
+        text: 'No HQ channel resolved — set RELAY_HQ_CHANNEL or invite the bot to #relay-hq / #relay-dispatch.',
+      });
+      return;
+    }
+    const now = Date.now();
+    const report = await generateReport({
+      service: deps.service,
+      llm: deps.llm,
+      period: parseReportPeriod(arg, now),
+      now,
+      resolvePublicId,
+    });
+    await deps.notifier.postToChannel(channel, report.text, report.blocks);
+    // Best-effort: upload the Markdown as a file snippet (never blocks the summary).
+    const uploader = client as unknown as {
+      files?: { uploadV2?: (a: Record<string, unknown>) => Promise<unknown> };
+    };
+    if (typeof uploader.files?.uploadV2 === 'function') {
+      try {
+        await uploader.files.uploadV2({
+          channel_id: channel,
+          filename: 'relay-verified-impact-report.md',
+          title: 'Relay verified-impact report',
+          content: report.markdown,
+        });
+      } catch (err) {
+        logger.warn({ err }, 'report: markdown upload failed (non-fatal)');
+      }
+    }
+    await writeCanvas(client as unknown as CanvasWriteClient, {
+      channelId: channel,
+      title: 'Relay verified-impact report',
+      markdown: report.markdown,
+    });
+    await respond({ response_type: 'ephemeral', text: `Report posted to <#${channel}> (source: ${report.source}).` });
+  };
+
+  // /relay volunteer → onboarding modal · /relay volunteers → roster · /relay sitrep → F6 ·
+  // /relay report [period] → F7.
   app.command('/relay', async ({ command, ack, respond, client }) => {
     await ack();
-    const sub = (command.text ?? '').trim().split(/\s+/)[0]?.toLowerCase() ?? '';
+    const parts = (command.text ?? '').trim().split(/\s+/);
+    const sub = parts[0]?.toLowerCase() ?? '';
+    const arg = parts.slice(1).join(' ');
     try {
       if (sub === 'volunteer') {
         const existing = await deps.volunteerStore.getBySlackUser(command.user_id);
@@ -907,10 +989,14 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       } else if (sub === 'volunteers') {
         const list = await deps.volunteerStore.list();
         await respond({ response_type: 'ephemeral', text: rosterText(list) });
+      } else if (sub === 'sitrep') {
+        await runSitrep(client, respond);
+      } else if (sub === 'report') {
+        await runReport(client, respond, arg);
       } else {
         await respond({
           response_type: 'ephemeral',
-          text: 'Usage: `/relay volunteer` to join or update your profile · `/relay volunteers` to see the roster.',
+          text: 'Usage: `/relay volunteer` join/update · `/relay volunteers` roster · `/relay sitrep` live board · `/relay report [24h|7d|30d]` verified-impact report.',
         });
       }
     } catch (err) {
@@ -966,6 +1052,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         port: deps.port,
         intake: deps.roles.intakeChannelId,
         dispatch: deps.roles.dispatchChannelId,
+        hq: deps.roles.hqChannelId,
       },
       'relay up',
     );
