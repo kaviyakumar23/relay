@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { App } from '@slack/bolt';
+import { App, Assistant } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
+import type { Scenario } from '../../demo/scenarios/schema';
+import { type AskRelayResult, askRelay } from '../assistant/askRelay';
+import { RtsClient, type RtsResolver } from '../assistant/rts';
+import { createMockRts } from '../assistant/rtsMock';
+import { compressedClockNote, type InjectorPostMessage, runFloodInjector, SIMULATOR_IDENTITY } from '../demo/injector';
+import { type DemoResetStore, type ResetDemoResult, resetDemo } from '../demo/reset';
 import { slaDueAtIso } from '../drift/sla';
 import { needEventKey } from '../ledger/idempotency';
 import type { NeedService } from '../ledger/needService';
@@ -29,6 +35,15 @@ import {
   SIGNOFF_ACTION,
 } from '../surfaces/evidenceModal';
 import {
+  buildArchitecture,
+  buildGuidedTour,
+  buildJudgeWelcome,
+  JUDGE_ARCH,
+  JUDGE_RESET,
+  JUDGE_RUN_DEMO,
+  JUDGE_TOUR,
+} from '../surfaces/judgeChannel';
+import {
   ASSIGN_PICK_ACTION,
   buildMatchBlocks,
   type MatchNeed,
@@ -37,7 +52,15 @@ import {
   REASSIGN_PICK_ACTION,
 } from '../surfaces/matchCard';
 import { parseMergeTarget } from '../surfaces/needCard';
-import { ACTIONS, context, escapeMrkdwn, parseActionId, type SlackView } from '../surfaces/primitives';
+import {
+  ACTIONS,
+  context,
+  escapeMrkdwn,
+  parseActionId,
+  type SlackBlock,
+  type SlackView,
+  section,
+} from '../surfaces/primitives';
 import { EVIDENCE_KIND_LABEL, verificationStatus } from '../surfaces/verification';
 import { buildVolunteerModal, parseVolunteerSubmission, VOLUNTEER_CALLBACK_ID } from '../surfaces/volunteerModal';
 import type { DedupeStore } from './dedupe';
@@ -58,6 +81,8 @@ export interface MutableRoles {
   dispatchChannelId: string;
   /** #relay-hq — where sitreps/reports post. Falls back to dispatch when unresolved. */
   hqChannelId: string;
+  /** #judges-start-here — the judge on-ramp (F8). Falls back to dispatch when unresolved. */
+  judgesChannelId: string;
 }
 
 export interface ChannelRoleConfig {
@@ -67,10 +92,13 @@ export interface ChannelRoleConfig {
   dispatchChannelId?: string;
   /** RELAY_HQ_CHANNEL override (a channel id). */
   hqChannelId?: string;
+  /** RELAY_JUDGES_CHANNEL override (a channel id). */
+  judgesChannelId?: string;
   /** Fallback name lookup via conversations.list. */
   intakeChannelName?: string;
   dispatchChannelName?: string;
   hqChannelName?: string;
+  judgesChannelName?: string;
 }
 
 export interface SlackAppDeps {
@@ -104,11 +132,21 @@ export interface SlackAppDeps {
    * buildDriftCallbacks so the button handlers and the drift sweep share one implementation.
    * Undefined disables the auto-reassign side effects (e.g. drift-less tests). */
   proposeReassign?: (need: ProjectedNeed, excludeVolunteerId?: string) => Promise<void>;
+  /** The flood scenario the judge "Run demo" button + `/relay demo start` play into #relay-intake
+   * (as the 🧪 simulator). Undefined disables the judge demo (the button reports it's unconfigured). */
+  demoScenario?: Scenario;
+  /** The demo teardown seam behind the judge "Reset" button + `/relay demo reset`. Postgres purge
+   * in prod, an in-memory stand-in offline. Undefined ⇒ reset only republishes App Home. */
+  demoResetStore?: DemoResetStore;
+  /** User token (xoxp-) enabling live Real-Time Search grounding for the Assistant; when absent
+   * the assistant uses the deterministic RTS mock and answers ledger-only (CLAUDE.md §9 honesty). */
+  slackUserToken?: string;
 }
 
 const DEFAULT_INTAKE_NAME = 'relay-intake';
 const DEFAULT_DISPATCH_NAME = 'relay-dispatch';
 const DEFAULT_HQ_NAME = 'relay-hq';
+const DEFAULT_JUDGES_NAME = 'judges-start-here';
 
 /** Build a name→id map of every channel the bot can see (paginated). */
 async function channelsByName(client: WebClient): Promise<Map<string, string>> {
@@ -135,11 +173,16 @@ async function resolveRoles(client: WebClient, roles: MutableRoles, cfg: Channel
   const intakeId = cfg.intakeChannelId;
   const dispatchId = cfg.dispatchChannelId;
   const hqId = cfg.hqChannelId;
-  const needsLookup = !intakeId || !dispatchId || !hqId;
+  const judgesId = cfg.judgesChannelId;
+  const needsLookup = !intakeId || !dispatchId || !hqId || !judgesId;
   const byName = needsLookup ? await channelsByName(client) : new Map<string, string>();
   roles.intakeChannelId = intakeId ?? byName.get(cfg.intakeChannelName ?? DEFAULT_INTAKE_NAME) ?? '';
   roles.dispatchChannelId = dispatchId ?? byName.get(cfg.dispatchChannelName ?? DEFAULT_DISPATCH_NAME) ?? '';
   roles.hqChannelId = hqId ?? byName.get(cfg.hqChannelName ?? DEFAULT_HQ_NAME) ?? roles.dispatchChannelId;
+  // #judges-start-here is optional; when it can't be resolved the judge welcome simply isn't
+  // published, but the four judge actions + `/relay demo …` still work from any channel.
+  roles.judgesChannelId =
+    judgesId ?? byName.get(cfg.judgesChannelName ?? DEFAULT_JUDGES_NAME) ?? roles.dispatchChannelId;
 }
 
 /** Safely read an action_id off Bolt's (union-typed) action payload. */
@@ -211,6 +254,33 @@ function rosterText(list: Volunteer[]): string {
   });
   return `*Volunteer roster* (${list.length})\n${lines.join('\n')}`;
 }
+
+/** Read a user's text off an assistant-thread message payload (ignore bot/system subtypes). */
+function readAssistantText(message: unknown): string {
+  const m = message as { text?: unknown; subtype?: unknown };
+  if (m.subtype !== undefined) return '';
+  return typeof m.text === 'string' ? m.text.trim() : '';
+}
+
+/** Render an Ask-Relay result as a Slack message: the answer, its citations, and a grounding tag. */
+function buildAssistantAnswer(result: AskRelayResult): { text: string; blocks: SlackBlock[] } {
+  const blocks: SlackBlock[] = [section(result.answer)];
+  if (result.citations.length > 0) {
+    const links = result.citations
+      .map((c) => (c.permalink !== undefined ? `<${c.permalink}|${escapeMrkdwn(c.label)}>` : escapeMrkdwn(c.label)))
+      .join('  ·  ');
+    blocks.push(context(`Sources: ${links}`));
+  }
+  blocks.push(context(result.usedRts ? 'Grounded in the ledger + Real-Time Search' : 'Grounded in the ledger'));
+  return { text: result.answer, blocks };
+}
+
+/** A single normalized token for a synthetic simulator user id (per-persona intake attribution). */
+const injectSlug = (s: string): string =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_|_$/g, '') || 'sim';
 
 export interface BuiltSlackApp {
   app: App;
@@ -903,6 +973,193 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     await renderEvidenceCard(needId, body);
   });
 
+  // --- Judge experience (F8) --------------------------------------------------
+  // #judges-start-here on-ramp: a "Run flood demo" button that plays the scenario into
+  // #relay-intake as the 🧪 simulator (the REAL pipeline triages it), an idempotent "Reset",
+  // and ephemeral "Guided tour" / "Architecture" cards. The same actions are reachable via
+  // `/relay demo start|reset`. All demo state is is_demo-flagged (CLAUDE.md 10).
+
+  /** Post arbitrary blocks as an ephemeral (only the clicking judge sees it — no channel clutter). */
+  const postEphemeralBlocks = async (
+    client: WebClient,
+    channel: string,
+    user: string,
+    text: string,
+    blocks: SlackBlock[],
+  ): Promise<void> => {
+    const args = { channel, user, text, blocks } as unknown as Parameters<typeof client.chat.postEphemeral>[0];
+    await client.chat.postEphemeral(args);
+  };
+
+  /** (Re)publish the judge welcome card to #judges-start-here (no-op when it isn't resolvable). */
+  const publishJudgeWelcome = async (): Promise<void> => {
+    const channel = deps.roles.judgesChannelId;
+    if (channel === '') return;
+    try {
+      await deps.notifier.postToChannel(channel, 'Relay — judges, start here', buildJudgeWelcome());
+    } catch (err) {
+      logger.warn({ err }, 'judge welcome publish failed');
+    }
+  };
+
+  /** Play the flood scenario into #relay-intake as the 🧪 simulator, feeding the real pipeline. */
+  const runJudgeDemo = async (): Promise<void> => {
+    const scenario = deps.demoScenario;
+    const channel = deps.roles.intakeChannelId;
+    if (scenario === undefined || channel === '') return;
+    const postMessage: InjectorPostMessage = async (text, { personaName }) => {
+      const res = await app.client.chat.postMessage({
+        channel,
+        text,
+        username: personaName,
+        icon_emoji: ':test_tube:',
+      });
+      const ts = typeof res.ts === 'string' ? res.ts : '';
+      if (ts === '') return;
+      let permalink: string | undefined;
+      try {
+        permalink = (await app.client.chat.getPermalink({ channel, message_ts: ts })).permalink;
+      } catch (err) {
+        logger.debug({ err }, 'judge inject: getPermalink failed (non-fatal)');
+      }
+      // Feed the SAME intake path a real user message takes. The round-tripped bot_message event is
+      // dropped by the subtype filter, and needCreatedKey would collapse it regardless — so there is
+      // no double processing: judges see the 🧪 flood; the pipeline triages it into #relay-dispatch.
+      await handleIntakeMessage(
+        {
+          eventId: `judge-inject:${channel}:${ts}`,
+          teamId: '',
+          channelId: channel,
+          messageTs: ts,
+          userId: `sim_${injectSlug(personaName)}`,
+          text,
+          permalink,
+        },
+        { queue: deps.queue, dedupe: deps.dedupe, isIntakeChannel },
+      );
+    };
+    await runFloodInjector({ scenario, postMessage });
+  };
+
+  /** Idempotent demo teardown: purge is_demo state (when a store is wired), republish App Home for
+   * the clicking judge, and refresh the welcome card. Safe to run repeatedly. */
+  const runJudgeReset = async (userId?: string): Promise<ResetDemoResult> => {
+    const republishHome = async (): Promise<void> => {
+      if (userId === undefined) return;
+      try {
+        await deps.notifier.publishHome(userId, await deps.service.listNeeds());
+      } catch (err) {
+        logger.debug({ err }, 'judge reset: republish home failed');
+      }
+    };
+    const result = await resetDemo({ store: deps.demoResetStore, purgeIsDemo: true, republishHome });
+    await publishJudgeWelcome();
+    return result;
+  };
+
+  app.action(JUDGE_RUN_DEMO, async ({ ack, body }) => {
+    await ack();
+    const ctx = readBodyContext(body);
+    const scenario = deps.demoScenario;
+    if (scenario === undefined || deps.roles.intakeChannelId === '') {
+      await notifyError(ctx, 'The flood demo is not configured here (no scenario / unresolved #relay-intake channel).');
+      return;
+    }
+    const count = scenario.steps.filter((s) => s.kind === 'intake_message').length;
+    await notifyError(
+      ctx,
+      `▶ Flood demo started — ${count} simulated reports (🧪 ${SIMULATOR_IDENTITY}) will arrive in ` +
+        `<#${deps.roles.intakeChannelId}> over ~40s, then flow through triage → dispatch. ` +
+        compressedClockNote(scenario.sla_multiplier),
+    );
+    // Fire-and-forget: the injector trickles for ~40s; never block the ack window on it.
+    void runJudgeDemo().catch((err) => logger.error({ err }, 'judge demo run failed'));
+  });
+
+  app.action(JUDGE_RESET, async ({ ack, body }) => {
+    await ack();
+    const ctx = readBodyContext(body);
+    try {
+      const result = await runJudgeReset(ctx.user);
+      const summary = result.noop
+        ? 'the board was already clear'
+        : `purged ${result.purged.needs} need(s) / ${result.purged.events} event(s)`;
+      await notifyError(ctx, `↺ Demo reset — ${summary}. App Home + the judge welcome are refreshed.`);
+    } catch (err) {
+      logger.error({ err }, 'judge reset failed');
+      await notifyError(ctx, 'Could not reset the demo — see logs.');
+    }
+  });
+
+  app.action(JUDGE_TOUR, async ({ ack, body, client }) => {
+    await ack();
+    const ctx = readBodyContext(body);
+    if (!ctx.channel || !ctx.user) return;
+    try {
+      await postEphemeralBlocks(client, ctx.channel, ctx.user, 'Relay — guided tour', buildGuidedTour());
+    } catch (err) {
+      logger.error({ err }, 'judge tour failed');
+    }
+  });
+
+  app.action(JUDGE_ARCH, async ({ ack, body, client }) => {
+    await ack();
+    const ctx = readBodyContext(body);
+    if (!ctx.channel || !ctx.user) return;
+    try {
+      await postEphemeralBlocks(client, ctx.channel, ctx.user, 'Relay — architecture', buildArchitecture());
+    } catch (err) {
+      logger.error({ err }, 'judge arch failed');
+    }
+  });
+
+  // --- Assistant pane (Slack AI) ----------------------------------------------
+  // Ask-Relay answers a coordinator's question grounded in the PII-free ledger (+ optional RTS).
+  // A user token lights up live Real-Time Search; without one the deterministic mock keeps the
+  // seam wired and answers stay ledger-only (CLAUDE.md §9 honesty). LLM synthesis via P-7 when a
+  // key is configured (deps.llm), else the deterministic template path inside askRelay.
+  const assistantRts: RtsResolver = deps.slackUserToken
+    ? new RtsClient({ client: app.client, userToken: deps.slackUserToken })
+    : createMockRts({});
+  const suggestedPrompts = [
+    { title: 'Open critical needs', message: 'Any critical needs still open?' },
+    { title: 'Who is drifting?', message: 'Which obligations are past their SLA right now?' },
+    { title: 'Sitrep', message: 'Give me the current situation report.' },
+  ];
+
+  const assistant = new Assistant({
+    threadStarted: async ({ setSuggestedPrompts }) => {
+      try {
+        await setSuggestedPrompts({ title: 'Ask Relay about live operations', prompts: suggestedPrompts });
+      } catch (err) {
+        logger.warn({ err }, 'assistant: setSuggestedPrompts failed');
+      }
+    },
+    userMessage: async ({ message, say, setStatus }) => {
+      const question = readAssistantText(message);
+      if (question === '') return;
+      try {
+        await setStatus('Reading the ledger…');
+      } catch (err) {
+        logger.debug({ err }, 'assistant: setStatus failed');
+      }
+      try {
+        const result = await askRelay({
+          question,
+          service: deps.service,
+          llm: deps.llm,
+          rts: assistantRts,
+          now: Date.now(),
+        });
+        await say(buildAssistantAnswer(result) as unknown as Parameters<typeof say>[0]);
+      } catch (err) {
+        logger.error({ err }, 'assistant: askRelay failed');
+        await say('I hit an error reading the ledger — try again in a moment.');
+      }
+    },
+  });
+  app.assistant(assistant);
+
   // The channel sitreps/reports post to (#relay-hq, falling back to #relay-dispatch).
   const hqChannel = (): string => deps.roles.hqChannelId || deps.roles.dispatchChannelId;
 
@@ -971,8 +1228,39 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     await respond({ response_type: 'ephemeral', text: `Report posted to <#${channel}> (source: ${report.source}).` });
   };
 
+  // /relay demo start flood-1 → play the flood into #relay-intake as the 🧪 simulator (keyboard
+  // equivalent of the judge "Run flood demo" button) · /relay demo reset → idempotent teardown.
+  const runDemoCommand = async (which: string, respond: SlashRespond, userId: string): Promise<void> => {
+    if (which === 'start') {
+      const scenario = deps.demoScenario;
+      if (scenario === undefined || deps.roles.intakeChannelId === '') {
+        await respond({
+          response_type: 'ephemeral',
+          text: 'The flood demo is not configured here (no scenario / unresolved #relay-intake channel).',
+        });
+        return;
+      }
+      const count = scenario.steps.filter((s) => s.kind === 'intake_message').length;
+      await respond({
+        response_type: 'ephemeral',
+        text:
+          `▶ Flood demo started — ${count} simulated reports (🧪 ${SIMULATOR_IDENTITY}) will trickle into ` +
+          `<#${deps.roles.intakeChannelId}> as they triage into #relay-dispatch. ${compressedClockNote(scenario.sla_multiplier)}`,
+      });
+      void runJudgeDemo().catch((err) => logger.error({ err }, 'demo start command failed'));
+    } else if (which === 'reset') {
+      const result = await runJudgeReset(userId);
+      const summary = result.noop
+        ? 'the board was already clear'
+        : `purged ${result.purged.needs} need(s) / ${result.purged.events} event(s)`;
+      await respond({ response_type: 'ephemeral', text: `↺ Demo reset — ${summary}. App Home + welcome refreshed.` });
+    } else {
+      await respond({ response_type: 'ephemeral', text: 'Usage: `/relay demo start flood-1` · `/relay demo reset`.' });
+    }
+  };
+
   // /relay volunteer → onboarding modal · /relay volunteers → roster · /relay sitrep → F6 ·
-  // /relay report [period] → F7.
+  // /relay report [period] → F7 · /relay demo start|reset → F8 judge demo.
   app.command('/relay', async ({ command, ack, respond, client }) => {
     await ack();
     const parts = (command.text ?? '').trim().split(/\s+/);
@@ -993,10 +1281,12 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         await runSitrep(client, respond);
       } else if (sub === 'report') {
         await runReport(client, respond, arg);
+      } else if (sub === 'demo') {
+        await runDemoCommand(parts[1]?.toLowerCase() ?? '', respond, command.user_id);
       } else {
         await respond({
           response_type: 'ephemeral',
-          text: 'Usage: `/relay volunteer` join/update · `/relay volunteers` roster · `/relay sitrep` live board · `/relay report [24h|7d|30d]` verified-impact report.',
+          text: 'Usage: `/relay volunteer` join/update · `/relay volunteers` roster · `/relay sitrep` live board · `/relay report [24h|7d|30d]` verified-impact report · `/relay demo start flood-1` | `reset` judge demo.',
         });
       }
     } catch (err) {
@@ -1053,9 +1343,12 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         intake: deps.roles.intakeChannelId,
         dispatch: deps.roles.dispatchChannelId,
         hq: deps.roles.hqChannelId,
+        judges: deps.roles.judgesChannelId,
       },
       'relay up',
     );
+    // Publish the judge on-ramp once the app is up (idempotent guard: only if resolvable).
+    await publishJudgeWelcome();
   };
 
   return { app, start };

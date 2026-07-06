@@ -10,6 +10,11 @@ export const config = Object.freeze({
     signingSecret: env.SLACK_SIGNING_SECRET ?? '',
     // Presence of an app-level token switches Bolt to Socket Mode (local dev).
     appToken: env.SLACK_APP_TOKEN ?? '',
+    // User token (xoxp-) for the Real-Time Search API (search:read.* are user-token
+    // scopes; a user token needs no action_token). Empty ⇒ RTS falls back to the mock
+    // and the integrator removes the RTS row from the qualifying-tech table (CLAUDE.md
+    // §9 honesty rule). See src/assistant/rts.ts.
+    userToken: env.SLACK_USER_TOKEN ?? '',
   }),
   // LLM provider is swappable — the core pipeline needs an LLM, not a specific
   // vendor. Default 'openai'; set LLM_PROVIDER=anthropic to switch. Both key

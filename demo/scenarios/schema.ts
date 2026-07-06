@@ -109,6 +109,9 @@ export const capabilitySchema = z.enum([
   'evidence',
   'sitrep',
   'report',
+  'judge',
+  'assistant',
+  'mcp',
 ]);
 export type Capability = z.infer<typeof capabilitySchema>;
 
@@ -123,6 +126,10 @@ export const ASSERT_CATALOG = {
   evidence: ['close_requires_evidence', 'hero_e2e'],
   sitrep: ['stats_match_ledger'],
   report: ['integrity_guard', 'no_pii'],
+  // F8 — the judge experience + the two P1 flourishes, each proven hermetically by the driver.
+  judge: ['injector_posts_as_simulator', 'reset_idempotent'],
+  assistant: ['answers_open_criticals', 'refuses_out_of_scope'],
+  mcp: ['search_needs_matches_ledger'],
 } as const satisfies Record<Capability, readonly string[]>;
 
 const countParams = z.object({ count: z.number().int().nonnegative() });
@@ -185,6 +192,36 @@ export const expectationSchema = z.discriminatedUnion('assert', [
   z.object({
     capability: z.literal('report'),
     assert: z.literal('no_pii'),
+    params: z.object({}).optional(),
+  }),
+  // F8 judge experience — the flood injector posts every intake message as the 🧪 simulator.
+  z.object({
+    capability: z.literal('judge'),
+    assert: z.literal('injector_posts_as_simulator'),
+    params: countParams,
+  }),
+  // F8 — the demo reset is idempotent (run once clears, run again is a safe no-op).
+  z.object({
+    capability: z.literal('judge'),
+    assert: z.literal('reset_idempotent'),
+    params: z.object({}).optional(),
+  }),
+  // P1 Slack AI (Ask-Relay) — grounded, PII-free answer that names the open criticals.
+  z.object({
+    capability: z.literal('assistant'),
+    assert: z.literal('answers_open_criticals'),
+    params: z.object({}).optional(),
+  }),
+  // P1 Slack AI — an out-of-relief-scope question is politely refused.
+  z.object({
+    capability: z.literal('assistant'),
+    assert: z.literal('refuses_out_of_scope'),
+    params: z.object({}).optional(),
+  }),
+  // P1 MCP — the read-only search_needs tool matches an independent ledger recount.
+  z.object({
+    capability: z.literal('mcp'),
+    assert: z.literal('search_needs_matches_ledger'),
     params: z.object({}).optional(),
   }),
 ]);

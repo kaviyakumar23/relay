@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { Expectation, IntakeMessageStep, Scenario, VolunteerClaimStep } from '../../demo/scenarios/schema';
+import { askRelay } from '../assistant/askRelay';
 import { buildDriftCallbacks } from '../drift/callbacks';
 import { runDriftSweep } from '../drift/driftEngine';
 import { InMemoryScheduler } from '../drift/scheduler/inMemoryScheduler';
@@ -21,6 +22,7 @@ import { matchRationale } from '../match/rationale';
 import { type LocalityCoord, type ScoreNeed, topN } from '../match/scorer';
 import { loadLocalityCoords, loadSeedVolunteers } from '../match/seedData';
 import { InMemoryVolunteerStore } from '../match/volunteerStore';
+import { createRelayTools, type NeedReadPort } from '../mcp-server/tools';
 import { computeSitrepStats } from '../narrate/aggregate';
 import { assertNoPii } from '../narrate/redaction';
 import { generateReport } from '../narrate/report';
@@ -30,6 +32,8 @@ import { HeuristicExtractor } from '../pipeline/extract';
 import { makeIntakeJobHandler } from '../pipeline/intakeJob';
 import { InlineQueue } from '../pipeline/queue';
 import { buildMatchBlocks, type MatchNeed, type RankedCandidate } from '../surfaces/matchCard';
+import { runFloodInjector, SIMULATOR_MARK } from './injector';
+import { InMemoryDemoResetStore, resetDemo } from './reset';
 
 // The hermetic storyboard driver (BUILD-DOC §12, §16.2). It assembles the EXACT
 // same intake pipeline the live app runs — memory event store + InlineQueue +
@@ -1003,10 +1007,192 @@ export async function evaluateReport(scenario: Scenario, a: HermeticAssembly): P
   return results;
 }
 
+/** Digits of every seed beneficiary contact in the scenario, so an assistant/MCP answer can be
+ * grepped for a leak independently of assertNoPii (defense in depth). */
+function seedContactDigits(scenario: Scenario): string[] {
+  return scenario.steps
+    .filter((s): s is IntakeMessageStep => s.kind === 'intake_message' && s.contact !== undefined)
+    .map((s) => (s.contact ?? '').replace(/\D+/g, ''))
+    .filter((d) => d.length > 0);
+}
+
+/**
+ * Evaluate the F8 judge tooling (P1 flourish surfaces), proven WITHOUT Slack:
+ *   · injector_posts_as_simulator — runFloodInjector plays every intake message through a
+ *     recorder and each post carries the 🧪 simulator mark (CLAUDE.md 10). No real waiting
+ *     (sleep is stubbed); the count must equal the scenario's intake-message count.
+ *   · reset_idempotent — resetDemo over an in-memory purge store clears the board on run 1
+ *     (noop=false) and is a safe no-op on run 2 (noop=true), republishing App Home both times.
+ * Ledger-independent: it exercises the same seams the live judge buttons wire (src/ingest).
+ */
+export async function evaluateJudge(scenario: Scenario, _a: HermeticAssembly): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+
+  const injectorExp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'injector_posts_as_simulator' }> =>
+      e.assert === 'injector_posts_as_simulator',
+  );
+  if (injectorExp !== undefined) {
+    const posts: string[] = [];
+    const summary = await runFloodInjector({
+      scenario,
+      postMessage: async (_text, opts) => {
+        posts.push(opts.personaName);
+      },
+      now: () => 0,
+      sleep: async () => {},
+    });
+    const allMarked = posts.length > 0 && posts.every((p) => p.startsWith(`${SIMULATOR_MARK} `));
+    const pass = summary.posted === injectorExp.params.count && posts.length === injectorExp.params.count && allMarked;
+    results.push({
+      capability: 'judge',
+      assert: 'injector_posts_as_simulator',
+      pass,
+      detail: pass
+        ? `injector posted ${summary.posted} intake message(s), every one under the 🧪 simulator identity`
+        : `posted=${summary.posted}/${injectorExp.params.count}, recorded=${posts.length}, allMarked=${allMarked}`,
+    });
+  }
+
+  const resetExp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'reset_idempotent' }> => e.assert === 'reset_idempotent',
+  );
+  if (resetExp !== undefined) {
+    const store = new InMemoryDemoResetStore({ needs: 14, events: 42, obligations: 2, evidence: 4, sitreps: 1 });
+    let homes = 0;
+    const republishHome = async (): Promise<void> => {
+      homes += 1;
+    };
+    const first = await resetDemo({ store, purgeIsDemo: true, republishHome });
+    const second = await resetDemo({ store, purgeIsDemo: true, republishHome });
+    const pass = first.noop === false && second.noop === true && homes === 2 && first.durationMs < 30_000;
+    results.push({
+      capability: 'judge',
+      assert: 'reset_idempotent',
+      pass,
+      detail: pass
+        ? `reset purged ${first.purged.needs} need(s) on run 1 then no-oped on run 2; App Home republished both runs (<30s)`
+        : `firstNoop=${first.noop}, secondNoop=${second.noop}, homes=${homes}`,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Evaluate Ask-Relay (the Slack-AI qualifying technology) against the post-hero ledger, no LLM
+ * (the deterministic template path is the hermetic one):
+ *   · answers_open_criticals — intent classifies as open-criticals, the answer names the open
+ *     critical needs, states the count that an INDEPENDENT recount of listNeeds produces, and is
+ *     PII-free (assertNoPii + no seed contact digits).
+ *   · refuses_out_of_scope — a non-relief question is refused: out-of-scope intent, no citations,
+ *     the polite refusal text. Reads real askRelay output — nothing is faked.
+ */
+export async function evaluateAssistant(scenario: Scenario, a: HermeticAssembly): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const now = referenceNow(await a.service.listNeeds());
+  const seedDigits = seedContactDigits(scenario);
+  const leaks = (text: string): string[] => seedDigits.filter((d) => text.replace(/\D+/g, '').includes(d));
+
+  const openCritExp = scenario.expectations.find((e) => e.assert === 'answers_open_criticals');
+  if (openCritExp !== undefined) {
+    // Independent recount: critical needs not in a terminal state (askRelay's open-critical set).
+    const active = (await a.service.listNeeds(now)).filter((n) => !TERMINAL_STATES.has(n.state));
+    const openCriticals = active.filter((n) => n.severity === 'critical');
+    const res = await askRelay({ question: 'any critical needs still open?', service: a.service, now });
+    const answerLeaks = leaks(res.answer);
+    const pass =
+      res.intent === 'open-criticals' &&
+      res.source === 'template' &&
+      res.usedRts === false &&
+      openCriticals.length > 0 &&
+      res.answer.includes(String(openCriticals.length)) &&
+      assertNoPii(res.answer).ok &&
+      answerLeaks.length === 0;
+    results.push({
+      capability: 'assistant',
+      assert: 'answers_open_criticals',
+      pass,
+      detail: pass
+        ? `Ask-Relay named the ${openCriticals.length} open critical need(s), grounded in the ledger, PII-free`
+        : `intent=${res.intent}, source=${res.source}, openCriticals=${openCriticals.length}, containsCount=${res.answer.includes(String(openCriticals.length))}, pii=${!assertNoPii(res.answer).ok}, leaks=${answerLeaks.length}`,
+    });
+  }
+
+  const refuseExp = scenario.expectations.find((e) => e.assert === 'refuses_out_of_scope');
+  if (refuseExp !== undefined) {
+    const res = await askRelay({ question: 'write me a short poem about the sunset', service: a.service, now });
+    const pass =
+      res.intent === 'out-of-scope' &&
+      res.citations.length === 0 &&
+      res.answer.includes('relief operations') &&
+      assertNoPii(res.answer).ok;
+    results.push({
+      capability: 'assistant',
+      assert: 'refuses_out_of_scope',
+      pass,
+      detail: pass
+        ? 'out-of-scope question refused (no citations, polite refusal)'
+        : `intent=${res.intent}, citations=${res.citations.length}, answer="${res.answer.slice(0, 60)}"`,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Evaluate the read-only MCP server (the MCP qualifying technology): search_needs with
+ * only_open + severity=critical must equal an INDEPENDENT recount off listNeeds (same
+ * open-state set + critical filter), return the same public ids, and carry no PII field.
+ * Drives the SAME createRelayTools the stdio entrypoint registers — nothing is faked.
+ */
+export async function evaluateMcp(scenario: Scenario, a: HermeticAssembly): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const exp = scenario.expectations.find((e) => e.assert === 'search_needs_matches_ledger');
+  if (exp === undefined) return results;
+
+  const now = referenceNow(await a.service.listNeeds());
+  const service: NeedReadPort = {
+    listNeeds: (n) => a.service.listNeeds(n),
+    getPublicId: (id) => a.store.getPublicId(id),
+  };
+  const tools = createRelayTools({ service, now: () => now });
+
+  // Independent recount straight off the projection: critical needs still in an OPEN_STATE_SET.
+  const recount: string[] = [];
+  for (const need of await a.service.listNeeds(now)) {
+    if (need.severity === 'critical' && OPEN_STATE_SET.has(need.state)) {
+      recount.push((await a.store.getPublicId(need.need_id)) ?? need.need_id);
+    }
+  }
+
+  const result = await tools.search_needs({ only_open: true, severity: 'critical' });
+  const body = JSON.parse(result.content[0]?.text ?? 'null') as {
+    count: number;
+    needs: Array<Record<string, unknown>>;
+  };
+  const toolIds = body.needs.map((n) => String(n.public_id)).sort();
+  const wantIds = [...recount].sort();
+  const noPiiKeys = body.needs.every((n) =>
+    Object.keys(n).every((k) => !/contact|phone|mobile|address|email|name/i.test(k)),
+  );
+  const idsMatch = toolIds.length === wantIds.length && toolIds.every((id, i) => id === wantIds[i]);
+  const pass = body.count === recount.length && idsMatch && noPiiKeys;
+  results.push({
+    capability: 'mcp',
+    assert: 'search_needs_matches_ledger',
+    pass,
+    detail: pass
+      ? `search_needs(only_open, critical) returned ${body.count} need(s) == an independent ledger recount [${toolIds.join(', ')}], PII-free`
+      : `tool=[${toolIds.join(', ')}] (${body.count}) vs ledger=[${wantIds.join(', ')}] (${recount.length}), piiFree=${noPiiKeys}`,
+  });
+  return results;
+}
+
 /** Asserts the driver evaluates today: the walking skeleton, extraction-backed triage,
  * dedupe auto-detection, the deterministic match slate, the drift/reassign hero arc, the
- * evidence/verification finale, and the sitrep/report narration guarantees (F6/F7).
- * Everything else is a documented SKIP. */
+ * evidence/verification finale, the sitrep/report narration guarantees (F6/F7), and the F8
+ * judge experience + P1 assistant/MCP flourishes. Everything else is a documented SKIP. */
 const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'needs_created_count',
   'needs_review_count',
@@ -1021,6 +1207,11 @@ const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'stats_match_ledger',
   'integrity_guard',
   'no_pii',
+  'injector_posts_as_simulator',
+  'reset_idempotent',
+  'answers_open_criticals',
+  'refuses_out_of_scope',
+  'search_needs_matches_ledger',
 ]);
 
 export interface SkippedExpectation {

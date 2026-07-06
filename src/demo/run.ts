@@ -2,10 +2,13 @@ import { readFileSync } from 'node:fs';
 import { parseScenario } from '../../demo/scenarios/schema';
 import {
   buildHermeticAssembly,
+  evaluateAssistant,
   evaluateDedupe,
   evaluateDrift,
   evaluateEvidence,
+  evaluateJudge,
   evaluateMatch,
+  evaluateMcp,
   evaluateReport,
   evaluateSitrep,
   evaluateSkeleton,
@@ -51,6 +54,10 @@ async function main(): Promise<number> {
     ...(await evaluateEvidence(scenario, assembly, run)),
     ...(await evaluateSitrep(scenario, assembly)),
     ...(await evaluateReport(scenario, assembly)),
+    // F8 judge experience + the two P1 flourishes, on the post-hero ledger.
+    ...(await evaluateJudge(scenario, assembly)),
+    ...(await evaluateAssistant(scenario, assembly)),
+    ...(await evaluateMcp(scenario, assembly)),
   ];
   let failures = 0;
   for (const r of results) {

@@ -19,6 +19,7 @@
     "test:integration": "vitest run -c vitest.integration.config.ts",
     "eval": "tsx eval/run.ts",
     "demo": "tsx src/demo/run.ts",
+    "mcp": "tsx src/mcp-server/stdio.ts",
     "db:migrate": "tsx src/lib/migrate.ts",
     "seed": "tsx src/demo/seed.ts",
     "scenario:lint": "tsx demo/scenarios/lint.ts"

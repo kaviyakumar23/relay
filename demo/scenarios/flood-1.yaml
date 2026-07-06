@@ -267,3 +267,28 @@ expectations:
   # (assertNoPii ok) and contains none of the seed phone digits.
   - capability: report
     assert: no_pii
+
+  # judge (F8) — the flood injector plays all 14 intake messages through a recorder,
+  # every one under the 🧪 "Relay Simulator" identity (CLAUDE.md 10).
+  - capability: judge
+    assert: injector_posts_as_simulator
+    params: { count: 14 }
+
+  # judge (F8) — the demo reset is idempotent: run 1 clears the board, run 2 is a safe
+  # no-op, and App Home is republished both times (the <30s judge-reset budget).
+  - capability: judge
+    assert: reset_idempotent
+
+  # assistant (P1 Slack AI) — Ask-Relay names the open critical needs on the post-hero
+  # ledger, grounded and PII-free, with the count an independent recount produces.
+  - capability: assistant
+    assert: answers_open_criticals
+
+  # assistant (P1 Slack AI) — an out-of-relief-scope question is politely refused.
+  - capability: assistant
+    assert: refuses_out_of_scope
+
+  # mcp (P1) — the read-only search_needs tool (only_open + critical) equals an
+  # independent ledger recount, returns the same public ids, and leaks no PII.
+  - capability: mcp
+    assert: search_needs_matches_ledger

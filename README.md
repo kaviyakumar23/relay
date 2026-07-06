@@ -37,8 +37,35 @@ Production runs the `manifest.prod.yaml` app in HTTP mode on AWS (see `infra/`).
 | `npm run typecheck` / `lint` | `tsc --noEmit` / Biome |
 | `npm run eval` | Extraction-accuracy eval on `eval/intake_set.jsonl` — these numbers go in the submission verbatim |
 | `npm run demo` | In-memory storyboard run (no Slack, no infra) |
+| `npm run mcp` | Read-only MCP server over stdio (for Claude Desktop — see below) |
 | `npm run db:migrate` / `seed` | Apply `db/migrations/*.sql` / load demo seed data |
 | `npm run scenario:lint` | Validate demo scenario + eval set against their schemas |
+
+## Qualifying technologies
+
+Relay uses all three, each with a real job:
+
+- **Slack AI capabilities** — the **Assistant pane**. Opening a thread sets suggested prompts; a question calls **Ask-Relay** (`src/assistant/askRelay.ts`), which answers grounded in the PII-free ledger, cites permalinks, and refuses out-of-relief-scope questions. No LLM key required — it falls back to a deterministic, ledger-grounded template.
+- **Real-Time Search (RTS) API** — Ask-Relay's field-context grounding via a hardened `assistant.search.context` client (`src/assistant/rts.ts`, throttled + retrying). It **lights up when `SLACK_USER_TOKEN` (xoxp-) is set** (the `search:read.*` scopes are user-token scopes); without one it degrades to a deterministic mock and answers ledger-only. RTS results are cited, never persisted (API ToS).
+- **MCP** — Relay **exposes a read-only MCP server** (`src/mcp-server/`): `search_needs`, `get_need`, `get_sitrep`, over the same PII-free projections the app uses (never the contact vault).
+
+### MCP server for Claude Desktop
+
+`npm run mcp` serves the read-only tools over stdio. Add Relay to Claude Desktop's `claude_desktop_config.json` (stdout is pure JSON-RPC; logs go to stderr):
+
+```json
+{
+  "mcpServers": {
+    "relay": {
+      "command": "npx",
+      "args": ["tsx", "src/mcp-server/stdio.ts"],
+      "cwd": "/absolute/path/to/relay"
+    }
+  }
+}
+```
+
+With no `DATABASE_URL` the server seeds an in-memory demo flood so the tools return live data with zero setup; set `DATABASE_URL` in the entry's `env` to query the real hosted ledger. Then ask Claude Desktop e.g. *"Use Relay to list open critical needs"* — the numbers match `/relay sitrep` and App Home.
 
 ## Docs
 

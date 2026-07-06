@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs';
 import { WebClient } from '@slack/web-api';
 import pg from 'pg';
+import { parseScenario, type Scenario } from '../demo/scenarios/schema';
 import { config } from './config';
+import { InMemoryDemoResetStore, PgDemoResetStore } from './demo/reset';
 import { buildDriftCallbacks } from './drift/callbacks';
 import { runDriftSweep } from './drift/driftEngine';
 import { BullmqScheduler } from './drift/scheduler/bullmqScheduler';
@@ -56,7 +59,7 @@ async function main(): Promise<void> {
 
   // Shared, mutable channel roles — filled by app start(); the notifier reads the
   // dispatch id through the same object so it sees the resolved value.
-  const roles: MutableRoles = { intakeChannelId: '', dispatchChannelId: '', hqChannelId: '' };
+  const roles: MutableRoles = { intakeChannelId: '', dispatchChannelId: '', hqChannelId: '', judgesChannelId: '' };
 
   // The notifier posts via its own Web client (independent of Bolt's receiver).
   const notifier = new SlackNotifier(new WebClient(botToken), () => roles.dispatchChannelId);
@@ -128,6 +131,17 @@ async function main(): Promise<void> {
     logger.warn('relay: no REDIS_URL — drift worker will not tick autonomously (set REDIS_URL for live SLA drift)');
   }
 
+  // F8 judge experience: the flood scenario the "Run demo" button + `/relay demo start` play, and
+  // the reset seam (Postgres purge in prod, an in-memory stand-in offline — a true purge of the
+  // in-memory ledger needs Postgres, so offline reset only republishes App Home).
+  let demoScenario: Scenario | undefined;
+  try {
+    demoScenario = parseScenario(readFileSync(new URL('../demo/scenarios/flood-1.yaml', import.meta.url), 'utf8'));
+  } catch (err) {
+    logger.warn({ err }, 'relay: could not load demo scenario (judge demo disabled)');
+  }
+  const demoResetStore = pool ? new PgDemoResetStore({ pool }) : new InMemoryDemoResetStore();
+
   const { start } = buildSlackApp({
     botToken,
     signingSecret,
@@ -142,6 +156,7 @@ async function main(): Promise<void> {
       intakeChannelId: process.env.RELAY_INTAKE_CHANNEL,
       dispatchChannelId: process.env.RELAY_DISPATCH_CHANNEL,
       hqChannelId: process.env.RELAY_HQ_CHANNEL,
+      judgesChannelId: process.env.RELAY_JUDGES_CHANNEL,
     },
     volunteerStore,
     localities,
@@ -152,6 +167,9 @@ async function main(): Promise<void> {
     isDemo: false,
     slaMultiplier: config.slaMultiplier,
     proposeReassign,
+    demoScenario,
+    demoResetStore,
+    slackUserToken: config.slack.userToken || undefined,
   });
 
   logger.info(
