@@ -1,3 +1,4 @@
+import type { NeedEvent } from '../ledger/events';
 import type { ProjectedNeed } from '../ledger/types';
 import { appHomeView } from '../surfaces/appHome';
 import { dispatchCard } from '../surfaces/needCard';
@@ -21,11 +22,26 @@ export interface CardRef {
   ts: string;
 }
 
+/** Optional render inputs threaded to the dispatch card: `events` (duplicate banner),
+ * a `publicIdOf` resolver (N-000x labels), and `extraBlocks` appended after the card
+ * (e.g. the match slate rendered under a need after triage). */
+export interface CardRenderOptions {
+  events?: NeedEvent[];
+  publicIdOf?: (needId: string) => string | undefined;
+  extraBlocks?: SlackBlock[];
+}
+
+/** Compose the dispatch card + any appended blocks from render options. */
+function renderCardBlocks(publicId: string, projection: ProjectedNeed, opts?: CardRenderOptions): SlackBlock[] {
+  const card = dispatchCard(publicId, projection, { events: opts?.events, publicIdOf: opts?.publicIdOf });
+  return opts?.extraBlocks && opts.extraBlocks.length > 0 ? [...card, ...opts.extraBlocks] : card;
+}
+
 export interface Notifier {
   /** Post the dispatch card for a newly-created need to #relay-dispatch. */
-  postDispatchCard(need: DispatchTarget, projection: ProjectedNeed): Promise<CardRef>;
-  /** Re-render an existing dispatch card in place (e.g. after triage). */
-  updateCard(ref: CardRef, need: DispatchTarget, projection: ProjectedNeed): Promise<void>;
+  postDispatchCard(need: DispatchTarget, projection: ProjectedNeed, opts?: CardRenderOptions): Promise<CardRef>;
+  /** Re-render an existing dispatch card in place (e.g. after triage / match). */
+  updateCard(ref: CardRef, need: DispatchTarget, projection: ProjectedNeed, opts?: CardRenderOptions): Promise<void>;
   /** Publish the App Home operations board for a user. */
   publishHome(userId: string, needs: ProjectedNeed[]): Promise<void>;
   /** Ephemeral notice to one user in a channel (e.g. "that button ships in triage"). */
@@ -63,22 +79,27 @@ export class SlackNotifier implements Notifier {
     private readonly dispatchChannel: () => string,
   ) {}
 
-  async postDispatchCard(need: DispatchTarget, projection: ProjectedNeed): Promise<CardRef> {
+  async postDispatchCard(need: DispatchTarget, projection: ProjectedNeed, opts?: CardRenderOptions): Promise<CardRef> {
     const channel = this.dispatchChannel();
     const res = await this.client.chat.postMessage({
       channel,
       text: cardFallback(need),
-      blocks: dispatchCard(need.publicId, projection),
+      blocks: renderCardBlocks(need.publicId, projection, opts),
     });
     return { channel: res.channel ?? channel, ts: res.ts ?? '' };
   }
 
-  async updateCard(ref: CardRef, need: DispatchTarget, projection: ProjectedNeed): Promise<void> {
+  async updateCard(
+    ref: CardRef,
+    need: DispatchTarget,
+    projection: ProjectedNeed,
+    opts?: CardRenderOptions,
+  ): Promise<void> {
     await this.client.chat.update({
       channel: ref.channel,
       ts: ref.ts,
       text: cardFallback(need),
-      blocks: dispatchCard(need.publicId, projection),
+      blocks: renderCardBlocks(need.publicId, projection, opts),
     });
   }
 
@@ -103,6 +124,7 @@ export interface RecordedUpdate {
   needId: string;
   publicId: string;
   projection: ProjectedNeed;
+  blocks: SlackBlock[];
 }
 
 export interface RecordedHome {
@@ -124,20 +146,31 @@ export class RecordingNotifier implements Notifier {
   readonly ephemerals: RecordedEphemeral[] = [];
   private seq = 0;
 
-  async postDispatchCard(need: DispatchTarget, projection: ProjectedNeed): Promise<CardRef> {
+  async postDispatchCard(need: DispatchTarget, projection: ProjectedNeed, opts?: CardRenderOptions): Promise<CardRef> {
     const ref: CardRef = { channel: 'C_DISPATCH_REC', ts: `ts_${this.seq++}` };
     this.cards.push({
       ...ref,
       needId: need.needId,
       publicId: need.publicId,
       projection,
-      blocks: dispatchCard(need.publicId, projection),
+      blocks: renderCardBlocks(need.publicId, projection, opts),
     });
     return ref;
   }
 
-  async updateCard(ref: CardRef, need: DispatchTarget, projection: ProjectedNeed): Promise<void> {
-    this.updates.push({ ref, needId: need.needId, publicId: need.publicId, projection });
+  async updateCard(
+    ref: CardRef,
+    need: DispatchTarget,
+    projection: ProjectedNeed,
+    opts?: CardRenderOptions,
+  ): Promise<void> {
+    this.updates.push({
+      ref,
+      needId: need.needId,
+      publicId: need.publicId,
+      projection,
+      blocks: renderCardBlocks(need.publicId, projection, opts),
+    });
   }
 
   async publishHome(userId: string, needs: ProjectedNeed[]): Promise<void> {

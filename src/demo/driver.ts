@@ -3,13 +3,20 @@ import type { Expectation, Scenario } from '../../demo/scenarios/schema';
 import { MemoryDedupeStore } from '../ingest/dedupe';
 import { handleIntakeMessage, type IntakeOutcome } from '../ingest/intakeHandler';
 import { RecordingNotifier } from '../ingest/notifier';
+import { isEvent } from '../ledger/events';
+import { needEventKey } from '../ledger/idempotency';
 import { NeedService } from '../ledger/needService';
 import { InMemoryEventStore } from '../ledger/store/memoryStore';
 import type { ProjectedNeed } from '../ledger/types';
 import { InMemoryContactVault } from '../lib/vault';
+import { matchRationale } from '../match/rationale';
+import { type LocalityCoord, type ScoreNeed, topN } from '../match/scorer';
+import { loadLocalityCoords, loadSeedVolunteers } from '../match/seedData';
+import { InMemoryVolunteerStore } from '../match/volunteerStore';
 import { HeuristicExtractor } from '../pipeline/extract';
 import { makeIntakeJobHandler } from '../pipeline/intakeJob';
 import { InlineQueue } from '../pipeline/queue';
+import { buildMatchBlocks, type MatchNeed, type RankedCandidate } from '../surfaces/matchCard';
 
 // The hermetic storyboard driver (BUILD-DOC §12, §16.2). It assembles the EXACT
 // same intake pipeline the live app runs — memory event store + InlineQueue +
@@ -30,6 +37,8 @@ export interface HermeticAssembly {
   dedupe: MemoryDedupeStore;
   queue: InlineQueue;
   vault: InMemoryContactVault;
+  volunteerStore: InMemoryVolunteerStore;
+  localities: LocalityCoord[];
   teamId: string;
   intakeChannelId: string;
   isIntakeChannel: (channelId: string) => boolean;
@@ -48,6 +57,9 @@ export function buildHermeticAssembly(opts: { baseClockMs?: number } = {}): Herm
   const extractor = new HeuristicExtractor();
   // A per-run random key: the vault is encrypted-at-rest even in the hermetic demo.
   const vault = new InMemoryContactVault(randomBytes(32).toString('hex'));
+  // Seed the roster + gazetteer so matching has candidates with zero env.
+  const volunteerStore = new InMemoryVolunteerStore(loadSeedVolunteers({ isDemo: true }));
+  const localities = loadLocalityCoords();
 
   let tick = base;
   const now = () => {
@@ -56,7 +68,11 @@ export function buildHermeticAssembly(opts: { baseClockMs?: number } = {}): Herm
     return v;
   };
 
-  const queue = new InlineQueue(makeIntakeJobHandler({ service, notifier, extractor, vault, now, isDemo: true }));
+  // `store` is threaded in so dedupe runs after extraction (exact-contact + fuzzy
+  // DuplicateProposed). No contactHashKey → the fixed dev salt (deterministic).
+  const queue = new InlineQueue(
+    makeIntakeJobHandler({ service, notifier, extractor, vault, store, now, isDemo: true }),
+  );
   const isIntakeChannel = (channelId: string): boolean => channelId === DEMO_INTAKE_CHANNEL;
 
   return {
@@ -66,6 +82,8 @@ export function buildHermeticAssembly(opts: { baseClockMs?: number } = {}): Herm
     dedupe,
     queue,
     vault,
+    volunteerStore,
+    localities,
     teamId: DEMO_TEAM,
     intakeChannelId: DEMO_INTAKE_CHANNEL,
     isIntakeChannel,
@@ -149,13 +167,14 @@ export async function runScenario(scenario: Scenario, a: HermeticAssembly): Prom
       skippedSteps.push({
         kind: step.kind,
         ref: `${step.volunteer_ref}->${step.need_ref}`,
-        reason: 'capability not built',
+        reason:
+          'self-claim needs the need OPEN + the drift capability (Jul 8); match is demonstrated via the match expectation',
       });
     } else {
       skippedSteps.push({
         kind: step.kind,
         ref: `${step.volunteer_ref}:${step.reply}`,
-        reason: 'capability not built',
+        reason: 'release → reassign lands with the drift capability (Jul 8)',
       });
     }
   }
@@ -241,12 +260,181 @@ export async function evaluateTriage(
   return results;
 }
 
-/** Asserts the driver evaluates today: the walking skeleton + the extraction-backed
- * triage checks. Everything else is a documented SKIP. */
+/** Index needs back to their originating intake step via `need.source.ts`. */
+function mapNeedsByStep(needs: ProjectedNeed[], run: ScenarioRunResult): Map<string, ProjectedNeed> {
+  const byStep = new Map<string, ProjectedNeed>();
+  for (const n of needs) {
+    const ref = n.source.ts === undefined ? undefined : run.stepIdByTs.get(n.source.ts);
+    if (ref !== undefined) byStep.set(ref, n);
+  }
+  return byStep;
+}
+
+/** The auto-detected duplicate proposals on a need: [otherNeedId, reason] per event. */
+async function proposalsOn(
+  a: HermeticAssembly,
+  need: ProjectedNeed,
+): Promise<Array<{ other: string; reason: string }>> {
+  const out: Array<{ other: string; reason: string }> = [];
+  for (const e of await a.service.getEvents(need.need_id)) {
+    if (isEvent(e, 'DuplicateProposed')) out.push({ other: e.payload.other_need_id, reason: e.payload.reason ?? '' });
+  }
+  return out;
+}
+
+/**
+ * Evaluate the dedupe expectations the engine now backs: exact-contact links and fuzzy
+ * "similar" proposals. Each yields a DuplicateProposed on the LATER (duplicate) need that
+ * references the ORIGINAL. Reads the ledger truth — never fakes a pass.
+ */
+export async function evaluateDedupe(
+  scenario: Scenario,
+  a: HermeticAssembly,
+  run: ScenarioRunResult,
+): Promise<ExpectationResult[]> {
+  const byStep = mapNeedsByStep(await a.service.listNeeds(), run);
+  const results: ExpectationResult[] = [];
+  for (const exp of scenario.expectations) {
+    if (exp.capability !== 'dedupe') continue;
+    if (exp.assert !== 'exact_contact_auto_link' && exp.assert !== 'duplicate_proposed_pairs') continue;
+    const wantReason = exp.assert === 'exact_contact_auto_link' ? 'exact_contact' : 'similar';
+    const misses: string[] = [];
+    for (const [dupRef, origRef] of exp.params.pairs) {
+      const dup = byStep.get(dupRef);
+      const orig = byStep.get(origRef);
+      if (dup === undefined || orig === undefined) {
+        misses.push(`${dupRef}->${origRef} (need not found)`);
+        continue;
+      }
+      const props = await proposalsOn(a, dup);
+      if (!props.some((p) => p.other === orig.need_id && p.reason === wantReason)) misses.push(`${dupRef}->${origRef}`);
+    }
+    const pass = misses.length === 0;
+    results.push({
+      capability: exp.capability,
+      assert: exp.assert,
+      pass,
+      detail: pass
+        ? `${exp.params.pairs.length} pair(s) proposed with reason '${wantReason}'`
+        : `no '${wantReason}' proposal for ${misses.join(', ')}`,
+    });
+  }
+  return results;
+}
+
+/**
+ * Evaluate the match expectation: a confirmed need yields a top-N volunteer slate. Drives
+ * the real flow deterministically — TriageConfirmed (human) → OPEN, deterministic scorer +
+ * grounded rationale → MatchSuggested (system) — then counts the suggested candidates from
+ * the ledger and renders the slate under the card.
+ */
+export async function evaluateMatch(
+  scenario: Scenario,
+  a: HermeticAssembly,
+  run: ScenarioRunResult,
+): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const needs = await a.service.listNeeds();
+  const byStep = mapNeedsByStep(needs, run);
+  const volunteers = await a.volunteerStore.list();
+  // A reference "now" comfortably after every intake event (transitions are time-gate-free).
+  const demoNow = Math.max(BASE_CLOCK_MS, ...needs.map((n) => Date.parse(n.created_at))) + 60_000;
+
+  for (const exp of scenario.expectations) {
+    if (exp.capability !== 'match' || exp.assert !== 'candidates_suggested') continue;
+    const need = byStep.get(exp.params.need_ref);
+    if (need === undefined) {
+      results.push({
+        capability: exp.capability,
+        assert: exp.assert,
+        pass: false,
+        detail: `need ${exp.params.need_ref} not found`,
+      });
+      continue;
+    }
+
+    if (need.state === 'TRIAGED' || need.state === 'NEEDS_REVIEW') {
+      await a.service.dispatch(
+        need.need_id,
+        { type: 'TriageConfirmed', payload: {} },
+        {
+          actor: { type: 'human', id: 'demo-coordinator' },
+          at: new Date(demoNow).toISOString(),
+          idempotencyKey: needEventKey(need.need_id, 'TriageConfirmed', 'demo'),
+          now: demoNow,
+        },
+      );
+    }
+    const open = (await a.service.getNeed(need.need_id, demoNow)) ?? need;
+    const scoreNeed: ScoreNeed = { type: open.type, localityId: open.locality_id, languages: open.languages };
+    const top = topN(scoreNeed, volunteers, a.localities, Math.max(exp.params.min_count, 3));
+    const ranked: RankedCandidate[] = [];
+    for (const c of top) ranked.push({ ...c, rationale: await matchRationale(c, scoreNeed) });
+
+    const suggested = await a.service.dispatch(
+      need.need_id,
+      {
+        type: 'MatchSuggested',
+        payload: {
+          candidates: ranked.map((c) => ({
+            volunteer_id: c.volunteer.slack_user_id,
+            score: Math.round(c.score * 10000) / 10000,
+          })),
+        },
+      },
+      {
+        actor: { type: 'system', id: 'relay-match' },
+        at: new Date(demoNow).toISOString(),
+        idempotencyKey: needEventKey(need.need_id, 'MatchSuggested', 'demo'),
+        now: demoNow,
+      },
+    );
+
+    let count = 0;
+    for (const e of await a.service.getEvents(need.need_id)) {
+      if (isEvent(e, 'MatchSuggested')) count = Math.max(count, e.payload.candidates.length);
+    }
+
+    // Render the slate under the (already-posted) card so the demo card shows the match.
+    const card = a.notifier.cards.find((c) => c.needId === need.need_id);
+    if (card !== undefined && suggested.need !== undefined) {
+      const matchNeed: MatchNeed = {
+        needId: need.need_id,
+        publicId: card.publicId,
+        type: suggested.need.type,
+        localityText: suggested.need.location_text,
+      };
+      await a.notifier.updateCard(
+        { channel: card.channel, ts: card.ts },
+        { needId: need.need_id, publicId: card.publicId },
+        suggested.need,
+        { events: await a.service.getEvents(need.need_id), extraBlocks: buildMatchBlocks(matchNeed, ranked) },
+      );
+    }
+
+    const pass = count >= exp.params.min_count;
+    results.push({
+      capability: exp.capability,
+      assert: exp.assert,
+      pass,
+      detail: pass
+        ? `${count} volunteer(s) suggested for ${exp.params.need_ref} (min ${exp.params.min_count})`
+        : `only ${count} suggested for ${exp.params.need_ref} (min ${exp.params.min_count})`,
+    });
+  }
+  return results;
+}
+
+/** Asserts the driver evaluates today: the walking skeleton, extraction-backed triage,
+ * dedupe auto-detection, and the deterministic match slate. Everything else is a
+ * documented SKIP. */
 const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'needs_created_count',
   'needs_review_count',
   'critical_severity_floor',
+  'exact_contact_auto_link',
+  'duplicate_proposed_pairs',
+  'candidates_suggested',
 ]);
 
 export interface SkippedExpectation {
@@ -257,8 +445,11 @@ export interface SkippedExpectation {
 
 function skipReason(exp: Expectation): string {
   if (exp.assert === 'distinct_needs_after_dedupe') {
-    return 'requires the dedupe capability (exact-contact auto-link + fuzzy merge); extraction alone leaves one need per message';
+    return 'dedupe auto-detects duplicates (DuplicateProposed), but the merge itself is a human-gated DuplicateConfirmed — the hermetic demo does not auto-merge, so all 14 needs remain';
   }
+  if (exp.capability === 'drift') return 'drift engine (SLA timers, nudges, reassignment) lands Jul 8';
+  if (exp.capability === 'evidence') return 'evidence/verification gating lands with F5';
+  if (exp.capability === 'sitrep') return 'sitrep narration lands with F6';
   return 'capability not built yet';
 }
 

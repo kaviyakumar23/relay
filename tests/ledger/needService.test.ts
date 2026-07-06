@@ -2,7 +2,15 @@ import { describe, expect, it } from 'vitest';
 import type { Command, NeedEvent } from '../../src/ledger/events';
 import { NeedService } from '../../src/ledger/needService';
 import { ConcurrencyError } from '../../src/ledger/store/errors';
-import type { AppendOpts, CreateNeedResult, EventStore, NeedInit } from '../../src/ledger/store/eventStore';
+import type {
+  AppendOpts,
+  CreateNeedResult,
+  DedupeCandidate,
+  DedupeCandidateQuery,
+  DedupeKeys,
+  EventStore,
+  NeedInit,
+} from '../../src/ledger/store/eventStore';
 import { InMemoryEventStore } from '../../src/ledger/store/memoryStore';
 import type { ProjectionCache } from '../../src/ledger/types';
 import { agent, human, isoClock, system } from './helpers';
@@ -151,8 +159,17 @@ class FlakyOnceStore implements EventStore {
   getAllNeedIds(): Promise<string[]> {
     return this.inner.getAllNeedIds();
   }
+  getPublicId(needId: string): Promise<string | null> {
+    return this.inner.getPublicId(needId);
+  }
   updateProjectionCache(needId: string, cache: ProjectionCache): Promise<void> {
     return this.inner.updateProjectionCache(needId, cache);
+  }
+  setDedupeKeys(needId: string, keys: DedupeKeys): Promise<void> {
+    return this.inner.setDedupeKeys(needId, keys);
+  }
+  findDedupeCandidates(q: DedupeCandidateQuery): Promise<DedupeCandidate[]> {
+    return this.inner.findDedupeCandidates(q);
   }
 }
 

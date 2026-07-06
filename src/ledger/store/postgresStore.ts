@@ -2,7 +2,15 @@ import pg from 'pg';
 import { assertNoRawContent, type NeedEvent } from '../events';
 import type { Actor, ActorType, ProjectionCache } from '../types';
 import { ConcurrencyError } from './errors';
-import type { AppendOpts, CreateNeedResult, EventStore, NeedInit } from './eventStore';
+import type {
+  AppendOpts,
+  CreateNeedResult,
+  DedupeCandidate,
+  DedupeCandidateQuery,
+  DedupeKeys,
+  EventStore,
+  NeedInit,
+} from './eventStore';
 
 const { Pool } = pg;
 
@@ -178,6 +186,11 @@ export class PostgresEventStore implements EventStore {
     return res.rows.map((r) => r.need_id);
   }
 
+  async getPublicId(needId: string): Promise<string | null> {
+    const res = await this.pool.query<{ public_id: string }>('SELECT public_id FROM needs WHERE id = $1', [needId]);
+    return res.rows[0]?.public_id ?? null;
+  }
+
   async updateProjectionCache(needId: string, cache: ProjectionCache): Promise<void> {
     await this.pool.query(
       `UPDATE needs SET status = $2, type = $3, severity = $4, locality_id = $5,
@@ -194,6 +207,71 @@ export class PostgresEventStore implements EventStore {
         JSON.stringify(cache.confidence),
       ],
     );
+  }
+
+  async setDedupeKeys(needId: string, keys: DedupeKeys): Promise<void> {
+    // Build the SET list additively: undefined fields are untouched, null clears.
+    const sets: string[] = [];
+    const vals: unknown[] = [needId];
+    if (keys.contactHash !== undefined) {
+      vals.push(keys.contactHash);
+      sets.push(`contact_hash = $${vals.length}`);
+    }
+    if (keys.dedupeText !== undefined) {
+      vals.push(keys.dedupeText);
+      sets.push(`dedupe_text = $${vals.length}`);
+    }
+    if (keys.embedding !== undefined) {
+      // pgvector accepts the textual form '[1,2,3]'; null clears the column.
+      vals.push(keys.embedding === null ? null : `[${keys.embedding.join(',')}]`);
+      sets.push(`embedding = $${vals.length}::vector`);
+    }
+    if (sets.length === 0) return;
+    await this.pool.query(`UPDATE needs SET ${sets.join(', ')} WHERE id = $1`, vals);
+  }
+
+  async findDedupeCandidates(q: DedupeCandidateQuery): Promise<DedupeCandidate[]> {
+    const res = await this.pool.query<{
+      id: string;
+      public_id: string;
+      contact_hash: string | null;
+      dedupe_text: string | null;
+      embedding: unknown;
+      status: string;
+    }>(
+      `SELECT id, public_id, contact_hash, dedupe_text, embedding, status
+         FROM needs
+        WHERE type = $1
+          AND status NOT IN ('DUPLICATE', 'CLOSED', 'CANCELLED', 'EXPIRED')
+          AND id <> $2
+          AND created_at >= to_timestamp($3 / 1000.0)
+          AND created_at <= to_timestamp($4 / 1000.0)
+          AND ($5::int IS NULL OR locality_id = $5::int)`,
+      [q.type, q.excludeNeedId, q.sinceMs, q.now, q.localityId],
+    );
+    return res.rows.map((r) => ({
+      needId: r.id,
+      publicId: r.public_id,
+      contactHash: r.contact_hash,
+      dedupeText: r.dedupe_text,
+      embedding: PostgresEventStore.parseEmbedding(r.embedding),
+      status: r.status,
+    }));
+  }
+
+  /** pgvector returns a vector as the text '[1,2,3]' unless a parser is registered. */
+  private static parseEmbedding(raw: unknown): number[] | null {
+    if (raw === null || raw === undefined) return null;
+    if (Array.isArray(raw)) return raw.map(Number);
+    if (typeof raw === 'string') {
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.map(Number) : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 
   async close(): Promise<void> {

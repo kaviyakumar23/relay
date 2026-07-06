@@ -9,8 +9,11 @@ import { NeedService } from './ledger/needService';
 import type { EventStore } from './ledger/store/eventStore';
 import { InMemoryEventStore } from './ledger/store/memoryStore';
 import { PostgresEventStore } from './ledger/store/postgresStore';
+import { InMemoryAuditLog, PgAuditLog } from './lib/auditLog';
 import { logger } from './lib/logger';
-import { createLlm } from './llm/provider';
+import { createLlm, type LlmProvider } from './llm/provider';
+import { loadLocalityCoords, loadSeedVolunteers } from './match/seedData';
+import { InMemoryVolunteerStore, PgVolunteerStore, type VolunteerStore } from './match/volunteerStore';
 import { type Extractor, HeuristicExtractor, LlmExtractor } from './pipeline/extract';
 import { makeIntakeJobHandler } from './pipeline/intakeJob';
 import { BullMQQueue, InlineQueue, type PipelineQueue } from './pipeline/queue';
@@ -61,7 +64,27 @@ async function main(): Promise<void> {
   // with a single warning when CONTACT_VAULT_KEY is unset).
   const vault = createContactVault({ keyHex: config.contactVaultKey, pool });
 
-  const jobHandler = makeIntakeJobHandler({ service, notifier, extractor, vault, isDemo: false });
+  // Volunteer roster + gazetteer coords for the matcher. Postgres roster in prod
+  // (seeded via `npm run seed`); in-memory seeded from seed/volunteers.json for a
+  // no-DB dev boot so matching + `/relay volunteers` work offline. The contact-hash
+  // key threads through so exact-contact dedupe is stable; empty → the fixed dev salt.
+  const volunteerStore: VolunteerStore = pool
+    ? new PgVolunteerStore({ pool })
+    : new InMemoryVolunteerStore(loadSeedVolunteers());
+  const localities = loadLocalityCoords();
+  const auditLog = pool ? new PgAuditLog(pool) : new InMemoryAuditLog();
+  const rationaleLlm: LlmProvider | undefined = hasLlmKey ? createLlm() : undefined;
+  const contactHashKey = config.contactVaultKey || undefined;
+
+  const jobHandler = makeIntakeJobHandler({
+    service,
+    notifier,
+    extractor,
+    vault,
+    store,
+    contactHashKey,
+    isDemo: false,
+  });
   let queue: PipelineQueue;
   if (config.redisUrl) {
     const bull = new BullMQQueue({ redisUrl: config.redisUrl, handler: jobHandler });
@@ -85,6 +108,13 @@ async function main(): Promise<void> {
       intakeChannelId: process.env.RELAY_INTAKE_CHANNEL,
       dispatchChannelId: process.env.RELAY_DISPATCH_CHANNEL,
     },
+    volunteerStore,
+    localities,
+    store,
+    vault,
+    auditLog,
+    llm: rationaleLlm,
+    isDemo: false,
   });
 
   logger.info(

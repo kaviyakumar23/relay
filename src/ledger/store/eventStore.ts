@@ -37,6 +37,39 @@ export interface CreateNeedResult {
   publicId: string;
 }
 
+/** Dedupe signals persisted on the `needs` row (all PII-free — see src/lib/contactHash.ts). */
+export interface DedupeKeys {
+  /** Keyed HMAC blind index of the beneficiary number, or null. Never the number itself. */
+  contactHash?: string | null;
+  /** PII-free derived text for trigram similarity, or null. */
+  dedupeText?: string | null;
+  /** Embedding vector for cosine similarity, or null when the trigram fallback is used. */
+  embedding?: number[] | null;
+}
+
+/** Query for active same-type/same-locality needs to dedupe a fresh one against. */
+export interface DedupeCandidateQuery {
+  type: string;
+  /** null → do not filter by locality (used for cross-locality exact-contact matching). */
+  localityId: number | null;
+  /** Lower bound (epoch ms) on created_at — the start of the dedupe window. */
+  sinceMs: number;
+  /** The fresh need itself, excluded from its own candidate set. */
+  excludeNeedId: string;
+  /** Upper bound (epoch ms) on created_at. */
+  now: number;
+}
+
+/** A candidate need to compare against, with its dedupe signals. */
+export interface DedupeCandidate {
+  needId: string;
+  publicId: string;
+  contactHash: string | null;
+  dedupeText: string | null;
+  embedding: number[] | null;
+  status: string;
+}
+
 export interface EventStore {
   /**
    * Atomically allocate a public_id, insert the `needs` registry row, and append
@@ -60,7 +93,26 @@ export interface EventStore {
 
   getAllNeedIds(): Promise<string[]>;
 
+  /** The human-facing public_id (N-0001) for a need, or null if unknown. Read-only —
+   * used by surfaces to label a need referenced only by its internal id (e.g. the
+   * merged-into target on a duplicate card). */
+  getPublicId(needId: string): Promise<string | null>;
+
   /** Write the `needs`-row projection cache. ONLY needService calls this, after
    * re-projecting — it is the only code allowed to write needs.status. */
   updateProjectionCache(needId: string, cache: ProjectionCache): Promise<void>;
+
+  /**
+   * Persist dedupe signals on the `needs` row (additive; does not touch status or any
+   * projection field). Fields left undefined are unchanged; an explicit null clears.
+   * The contact hash is a blind index — no plaintext contact ever reaches here.
+   */
+  setDedupeKeys(needId: string, keys: DedupeKeys): Promise<void>;
+
+  /**
+   * Active (not DUPLICATE/CLOSED/CANCELLED/EXPIRED) needs of the same type — and same
+   * locality when the query pins one — created within [sinceMs, now], excluding the
+   * fresh need. Demo-scale: a full scan is fine. Returns each candidate's dedupe signals.
+   */
+  findDedupeCandidates(q: DedupeCandidateQuery): Promise<DedupeCandidate[]>;
 }

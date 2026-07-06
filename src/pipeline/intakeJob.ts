@@ -1,9 +1,13 @@
-import type { Notifier } from '../ingest/notifier';
+import type { CardRenderOptions, Notifier } from '../ingest/notifier';
 import { needCreatedKey, needEventKey } from '../ledger/idempotency';
 import type { NeedService } from '../ledger/needService';
+import type { EventStore } from '../ledger/store/eventStore';
 import type { Actor, ProjectedNeed } from '../ledger/types';
+import { contactHash } from '../lib/contactHash';
 import { logger } from '../lib/logger';
 import type { ContactVault } from '../lib/vault';
+import { normalizeContact } from './contact';
+import { runDedupe } from './dedupe';
 import type { Extractor } from './extract';
 import { runExtraction } from './extract';
 import type { IntakeJob, JobHandler, JobTransient } from './queue';
@@ -33,11 +37,43 @@ export interface IntakeJobDeps {
   extractor: Extractor;
   /** Encrypted contact vault. Undefined = vaulting disabled (dev without a key). */
   vault?: ContactVault;
+  /** The event store — when present, dedupe runs after extraction (setDedupeKeys +
+   * runDedupe auto-detect DuplicateProposed). Undefined = dedupe disabled. */
+  store?: EventStore;
+  /** Key for the contact blind index (config.contactVaultKey in live; the fixed dev
+   * salt in hermetic runs when unset). PII-safe: only a keyed one-way hash is stored. */
+  contactHashKey?: string;
   /** Clock for the event timestamp + projection (defaults to Date.now). */
   now?: () => number;
   /** Override the creating actor (defaults to the intake agent). */
   actor?: Actor;
   isDemo?: boolean;
+}
+
+/** Result of the extraction step: the fresh projection + the normalized contact
+ * (kept in-memory only, for the blind index — never persisted or logged as itself). */
+interface ExtractionOutcome {
+  projection: ProjectedNeed;
+  contact: string | null;
+}
+
+/** Keyed one-way blind index of the beneficiary number, or null when there is none.
+ * Normalizes the display form back to canonical digits first so the SAME number always
+ * hashes identically. The plaintext never leaves this function. */
+function deriveContactHash(contact: string | null, keyHex?: string): string | null {
+  if (contact === null) return null;
+  const digits = normalizeContact(contact)?.digits ?? null;
+  return digits === null ? null : contactHash(digits, keyHex);
+}
+
+/** A PII-free derived signal for trigram similarity: need type + resolved locality +
+ * headcount. Contains only structured, card-visible fields — never raw message text. */
+function buildDedupeText(need: ProjectedNeed): string | null {
+  const parts: string[] = [need.type];
+  if (need.location_text !== null && need.location_text !== '') parts.push(need.location_text);
+  if (need.people_count !== null) parts.push(`for ${need.people_count}`);
+  const text = parts.join(' ').trim();
+  return text.length > 0 ? text : null;
 }
 
 /**
@@ -53,7 +89,7 @@ async function applyExtraction(
   nowMs: number,
   deps: IntakeJobDeps,
   fallback: ProjectedNeed,
-): Promise<ProjectedNeed> {
+): Promise<ExtractionOutcome> {
   const { payload, contact } = await runExtraction(text, deps.extractor);
 
   if (contact !== null && deps.vault !== undefined) {
@@ -84,7 +120,59 @@ async function applyExtraction(
     },
     'intake: extraction applied',
   );
-  return projection;
+  return { projection, contact };
+}
+
+/**
+ * After extraction, persist the (PII-free) dedupe signals and auto-detect duplicates.
+ * Returns render options (post-dedupe events + an N-000x resolver) so the freshly-posted
+ * card shows any '⚠️ possible duplicate' banner. Advisory: any failure is logged, never
+ * thrown — dedupe must never block or lose a need. Zero-copy: the contact is hashed to a
+ * blind index; the number itself is never persisted or logged.
+ */
+async function runDedupeStep(
+  needId: string,
+  publicId: string,
+  projection: ProjectedNeed,
+  contact: string | null,
+  nowMs: number,
+  deps: IntakeJobDeps,
+): Promise<CardRenderOptions | undefined> {
+  const store = deps.store;
+  if (store === undefined) return undefined;
+  try {
+    const hash = deriveContactHash(contact, deps.contactHashKey);
+    const dedupeText = buildDedupeText(projection);
+    await store.setDedupeKeys(needId, { contactHash: hash, dedupeText, embedding: null });
+    await runDedupe({
+      needId,
+      publicId,
+      type: projection.type,
+      localityId: projection.locality_id,
+      contactHash: hash,
+      dedupeText,
+      embedding: null,
+      createdAtMs: nowMs,
+      store,
+      service: deps.service,
+      now: nowMs,
+    });
+
+    const events = await deps.service.getEvents(needId);
+    const otherIds = new Set<string>();
+    for (const e of events) {
+      if (e.type === 'DuplicateProposed') otherIds.add(e.payload.other_need_id);
+    }
+    const labels = new Map<string, string>();
+    for (const id of otherIds) {
+      const pid = await store.getPublicId(id);
+      if (pid !== null) labels.set(id, pid);
+    }
+    return { events, publicIdOf: (id) => labels.get(id) };
+  } catch (err) {
+    logger.error({ err, need_id: needId, public_id: publicId }, 'intake: dedupe failed (non-fatal)');
+    return undefined;
+  }
 }
 
 /** Process one intake job: create the need (idempotently), extract, and post its card. */
@@ -122,12 +210,15 @@ export async function runIntakeJob(
 
   const target = { needId: outcome.needId, publicId: outcome.publicId };
   let projection = outcome.need;
+  let contact: string | null = null;
 
   // Raw text is present in practice; if it is somehow absent we skip extraction and
   // post the plain (pre-extraction) card rather than losing the need.
   if (transient?.text !== undefined) {
     try {
-      projection = await applyExtraction(outcome.needId, job, transient.text, nowMs, deps, outcome.need);
+      const extracted = await applyExtraction(outcome.needId, job, transient.text, nowMs, deps, outcome.need);
+      projection = extracted.projection;
+      contact = extracted.contact;
     } catch (err) {
       // A message must never be lost: on any extraction/vault/dispatch failure, fall
       // back to the pre-extraction NEW card so a human still sees the need.
@@ -138,7 +229,10 @@ export async function runIntakeJob(
     }
   }
 
-  await deps.notifier.postDispatchCard(target, projection);
+  // Auto-detect duplicates (advisory) so the card can flag a possible duplicate.
+  const cardOpts = await runDedupeStep(outcome.needId, outcome.publicId, projection, contact, nowMs, deps);
+
+  await deps.notifier.postDispatchCard(target, projection, cardOpts);
   logger.info(
     { need_id: outcome.needId, public_id: outcome.publicId, channel: job.channelId, state: projection.state },
     'intake: need created + dispatch card posted',

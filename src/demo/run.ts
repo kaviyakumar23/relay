@@ -1,6 +1,14 @@
 import { readFileSync } from 'node:fs';
 import { parseScenario } from '../../demo/scenarios/schema';
-import { buildHermeticAssembly, evaluateSkeleton, evaluateTriage, runScenario, skippedExpectations } from './driver';
+import {
+  buildHermeticAssembly,
+  evaluateDedupe,
+  evaluateMatch,
+  evaluateSkeleton,
+  evaluateTriage,
+  runScenario,
+  skippedExpectations,
+} from './driver';
 
 // `npm run demo` — the judge-runnable hermetic storyboard (BUILD-DOC §16.2/§16.3).
 // It plays flood-1.yaml through the real intake pipeline (no Slack, no infra, zero
@@ -27,7 +35,12 @@ async function main(): Promise<number> {
   }
   console.error('');
 
-  const results = [...(await evaluateSkeleton(scenario, assembly)), ...(await evaluateTriage(scenario, assembly, run))];
+  const results = [
+    ...(await evaluateSkeleton(scenario, assembly)),
+    ...(await evaluateTriage(scenario, assembly, run)),
+    ...(await evaluateDedupe(scenario, assembly, run)),
+    ...(await evaluateMatch(scenario, assembly, run)),
+  ];
   let failures = 0;
   for (const r of results) {
     if (!r.pass) failures += 1;

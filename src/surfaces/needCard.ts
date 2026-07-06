@@ -1,5 +1,16 @@
+import type { NeedEvent } from '../ledger/events';
 import type { ConfidenceStatus, ProjectedNeed } from '../ledger/types';
-import { ACTIONS, actions, button, context, escapeMrkdwn, fields, header, type SlackBlock } from './primitives';
+import {
+  ACTIONS,
+  actions,
+  button,
+  context,
+  escapeMrkdwn,
+  fields,
+  header,
+  type SlackBlock,
+  section,
+} from './primitives';
 
 // The dispatch card (BUILD-DOC §F2). Post-extraction version: a need materialises in
 // #relay-dispatch and, once P-1 extraction runs, the card shows the classified
@@ -27,8 +38,42 @@ const CONFIDENCE_GLYPH: Record<ConfidenceStatus, string> = {
   unknown: '?',
 };
 
-/** action_id for the (later-phase) reveal-with-audit button. */
+/** action_id for the reveal-with-audit button (wired in src/ingest/slackApp.ts). */
 const REVEAL_ACTION = 'need_reveal';
+
+/** States in which Confirm/Assign are still offered (pre-commit). Past this, the
+ * card shows a status line instead of the action row. */
+const PRE_COMMIT_STATES: ReadonlySet<string> = new Set([
+  'NEW',
+  'TRIAGED',
+  'OPEN',
+  'NEEDS_REVIEW',
+  'MATCH_SUGGESTED',
+  'REOPENED',
+]);
+
+/** Pack a need id + the proposed original's id into one Merge action entity id.
+ * parseActionId splits on the FIRST ':' only, so the two ids are joined with '|':
+ *   action_id = `need_merge:<needId>|<otherNeedId>`  (see ACTIONS.merge). */
+export function encodeMergeTarget(needId: string, otherNeedId: string): string {
+  return `${needId}|${otherNeedId}`;
+}
+
+/** Recover { needId, otherNeedId } from a packed Merge entity id / button value. */
+export function parseMergeTarget(entityId: string): { needId: string; otherNeedId: string } {
+  const i = entityId.indexOf('|');
+  return i < 0
+    ? { needId: entityId, otherNeedId: '' }
+    : { needId: entityId.slice(0, i), otherNeedId: entityId.slice(i + 1) };
+}
+
+/** Optional render inputs. `events` powers the duplicate banner (auto-detected
+ * DuplicateProposed); `publicIdOf` resolves an internal need id to its N-000x label
+ * for the banner / merged-into line (best-effort — falls back to a neutral phrase). */
+export interface DispatchCardOptions {
+  events?: NeedEvent[];
+  publicIdOf?: (needId: string) => string | undefined;
+}
 
 /** A friendly received-time label from an ISO timestamp (UTC, second precision). */
 function receivedLabel(iso: string): string {
@@ -81,34 +126,75 @@ function confidenceBlock(need: ProjectedNeed): SlackBlock {
   return context(`Confidence: ${parts.join('  ·  ')}   ( ✓ stated · ~ inferred · ? unknown )`);
 }
 
+/** Banner block(s) for each auto-detected duplicate (DuplicateProposed) that has not
+ * yet been human-merged: a warning line naming the likely original + a Merge button. */
+function duplicateBanners(need: ProjectedNeed, opts: DispatchCardOptions): SlackBlock[] {
+  const events = opts.events ?? [];
+  const out: SlackBlock[] = [];
+  const seen = new Set<string>();
+  for (const e of events) {
+    if (e.type !== 'DuplicateProposed') continue;
+    const otherId = e.payload.other_need_id;
+    if (otherId === '' || seen.has(otherId)) continue;
+    seen.add(otherId);
+    const label = opts.publicIdOf?.(otherId) ?? 'a recent report';
+    const why = e.payload.reason === 'exact_contact' ? 'same contact' : 'similar report';
+    out.push(section(`⚠️ *Possible duplicate of ${escapeMrkdwn(label)}* — ${why}.`));
+    out.push(actions([button('Merge', ACTIONS.merge, encodeMergeTarget(need.need_id, otherId), 'danger')]));
+  }
+  return out;
+}
+
+/** Compact card for a need already confirmed a duplicate (state DUPLICATE): it shows
+ * where it was merged, and offers no further action. */
+function mergedCard(publicId: string, need: ProjectedNeed, opts: DispatchCardOptions): SlackBlock[] {
+  const target = (need.merged_into !== null ? opts.publicIdOf?.(need.merged_into) : undefined) ?? 'another need';
+  return [
+    header(headerText(publicId, need)),
+    context(`Received ${receivedLabel(need.created_at)}  ·  Status: *DUPLICATE*`),
+    section(`🔗 *Merged into ${escapeMrkdwn(target)}* — this report is tracked there. No action needed here.`),
+    fieldsBlock(need),
+  ];
+}
+
 /**
  * Build the dispatch card blocks for a need.
  * @param publicId human-facing id (N-0001)
  * @param need the projected need (state, type/severity, derived fields) — no message text
+ * @param opts optional events (duplicate banner) + a public-id resolver
  */
-export function dispatchCard(publicId: string, need: ProjectedNeed): SlackBlock[] {
+export function dispatchCard(publicId: string, need: ProjectedNeed, opts: DispatchCardOptions = {}): SlackBlock[] {
+  if (need.merged_into !== null) return mergedCard(publicId, need, opts);
+
   // A vaulted contact is signalled by the derived `contact` confidence key (never the
   // number). Show the locked reveal control only when there is something to reveal.
   const hasContact = need.confidence.contact === 'stated';
-
-  const actionRow: SlackBlock[] = [
-    button('Confirm', ACTIONS.confirm, need.need_id, 'primary'),
-    button('Assign', ACTIONS.assign, need.need_id),
-  ];
-  if (hasContact) actionRow.push(button('🔒 Reveal contact', REVEAL_ACTION, need.need_id));
+  const committed = !PRE_COMMIT_STATES.has(need.state);
 
   const blocks: SlackBlock[] = [
     header(headerText(publicId, need)),
     context(`Received ${receivedLabel(need.created_at)}  ·  Status: *${need.state}*`),
+    ...duplicateBanners(need, opts),
     fieldsBlock(need),
     confidenceBlock(need),
-    actions(actionRow),
   ];
-  if (hasContact) {
-    blocks.push(context('_🔒 Contact is stored encrypted. Reveal writes an audit_log entry (vault UI, later phase)._'));
+
+  if (committed) {
+    // Past triage/assign: no Confirm/Assign row; keep the reveal control available.
+    if (need.assigned_volunteer_id !== null) blocks.push(context('✅ *Assigned* — a volunteer is committed.'));
+    if (hasContact) blocks.push(actions([button('🔒 Reveal contact', REVEAL_ACTION, need.need_id)]));
+  } else {
+    const actionRow: SlackBlock[] = [
+      button('Confirm', ACTIONS.confirm, need.need_id, 'primary'),
+      button('Assign', ACTIONS.assign, need.need_id),
+    ];
+    if (hasContact) actionRow.push(button('🔒 Reveal contact', REVEAL_ACTION, need.need_id));
+    blocks.push(actions(actionRow));
   }
-  blocks.push(
-    context('_Confirm & Assign go live in the triage phase. A human confirms every consequential transition._'),
-  );
+
+  if (hasContact) {
+    blocks.push(context('_🔒 Contact is stored encrypted. Reveal writes an audit_log entry._'));
+  }
+  blocks.push(context('_A human confirms every consequential transition._'));
   return blocks;
 }
