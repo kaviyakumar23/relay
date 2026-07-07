@@ -13,6 +13,7 @@ import type { NeedService } from '../ledger/needService';
 import type { EventStore } from '../ledger/store/eventStore';
 import type { ProjectedNeed } from '../ledger/types';
 import type { AuditLog } from '../lib/auditLog';
+import { checkHealth, type HealthDeps } from '../lib/health';
 import { logger } from '../lib/logger';
 import type { ContactVault } from '../lib/vault';
 import type { LlmProvider } from '../llm/provider';
@@ -141,6 +142,10 @@ export interface SlackAppDeps {
   /** User token (xoxp-) enabling live Real-Time Search grounding for the Assistant; when absent
    * the assistant uses the deterministic RTS mock and answers ledger-only (CLAUDE.md §9 honesty). */
   slackUserToken?: string;
+  /** Deep-health inputs for GET /healthz: the live pg.Pool + a Redis PING seam. A missing dep
+   * reports 'skip' (a valid in-memory config); a present-but-failing dep flips ok:false → 503 so
+   * UptimeRobot / the ALB pull the task from rotation. Undefined ⇒ the route reports skip/skip. */
+  health?: HealthDeps;
 }
 
 const DEFAULT_INTAKE_NAME = 'relay-intake';
@@ -305,8 +310,20 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         path: '/healthz',
         method: 'GET',
         handler: (_req, res) => {
-          res.writeHead(200, { 'content-type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, service: 'relay' }));
+          // Deep readiness probe (BUILD-DOC §9): actually query Postgres + PING Redis (short
+          // timeouts) so UptimeRobot / the ALB see a dead dependency as 503 instead of the old
+          // static 200 that kept a schema-less or Redis-less task in rotation. Never throws out
+          // of the route — any probe error resolves to a 503 rather than crashing the server.
+          void checkHealth(deps.health ?? {})
+            .then((report) => {
+              res.writeHead(report.ok ? 200 : 503, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ service: 'relay', ...report }));
+            })
+            .catch((err) => {
+              logger.error({ err }, 'healthz: deep check threw (returning 503)');
+              res.writeHead(503, { 'content-type': 'application/json' });
+              res.end(JSON.stringify({ ok: false, service: 'relay', checks: {} }));
+            });
         },
       },
     ],

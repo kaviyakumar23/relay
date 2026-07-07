@@ -240,7 +240,7 @@ Buttons in `#judges-start-here`: **▶ Run flood demo** (fires injector), **↺ 
 | **Real-Time Search (RTS) API** | Ask-Relay grounding: the hardened `RtsClient` (`src/assistant/rts.ts`, ported from InView + throttle/retry) wraps `assistant.search.context` to pull field context the ledger lacks and cites the returned permalinks. Wired into the assistant; **lights up when a user token (`SLACK_USER_TOKEN`, xoxp-) is configured** (the `search:read.*` scopes are user-token scopes) | With a user token: an answer about a locality cites a message permalink retrieved via RTS. **Without one it falls back to the deterministic mock and answers ledger-only** — RTS results are never persisted (ToS) |
 | **MCP integration** | Relay **exposes a read-only MCP server** (`src/mcp-server/`) with `search_needs`, `get_need`, `get_sitrep` over the same PII-free projections the app uses (never the vault). `npm run mcp` runs it over stdio for Claude Desktop; the factory is transport-agnostic (HTTP mount is a documented seam) | Claude Desktop configured with the Relay MCP server (README snippet) asks for open critical needs; the numbers match App Home / `/relay sitrep` |
 
-Other Slack platform surfaces used: Events API (`message`, `app_mention`, `app_home_opened`, `reaction_added`), Block Kit (cards, confidence chips), modals (`views.open`), App Home (`views.publish`), slash command `/relay` (incl. `/relay demo start|reset` for the judge flow), DMs, threads + permalinks, file uploads for evidence, Canvas API for sitreps/reports.
+Other Slack platform surfaces used: Events API (`message.{channels,groups,im}`, `app_home_opened`, `assistant_thread_started`/`assistant_thread_context_changed` — the shipped subscriptions; `app_mention`/`reaction_added` were dropped in the 2026-07-07 audit, see §9.3), Block Kit (cards, confidence chips), modals (`views.open`), App Home (`views.publish`), slash command `/relay` (incl. `/relay demo start|reset` for the judge flow), DMs, threads + permalinks, file uploads for evidence, Canvas API for sitreps/reports.
 
 **Shipped status (Jul 10, honesty rule).** All three qualifying technologies are wired into the running app: the Assistant pane + Ask-Relay (Slack AI) and the read-only MCP server are fully demonstrable with zero external services; RTS grounding is implemented and hardened but only exercises live Slack search when a `SLACK_USER_TOKEN` is present — absent that token it degrades to ledger-only answers via the mock (so the row stays honest either way). **If RTS cannot be shown live in the sandbox, state exactly this in the writeup rather than implying a live RTS demo.** Judges poke sandboxes.
 
@@ -267,7 +267,7 @@ Bolt-JS app (Node + TypeScript, single service "relay-core")
    └─ demo/          injector · reset · judge-tour handlers
 Postgres 16 (+ pgvector for dedupe embeddings) · Redis (BullMQ)
 Anthropic API (Claude) · Slack Web API
-Hosting: AWS (ECS Fargate + ALB + CloudFront, RDS, ElastiCache — see infra/) · UptimeRobot on /healthz
+Hosting: AWS (ECS Fargate + ALB + CloudFront, RDS, ElastiCache — see infra/) · UptimeRobot on /healthz (deep probe: `GET /healthz` actually queries Postgres + PINGs Redis and returns 503 when a wired dependency is down, so a dead pg/redis pulls the task from rotation instead of reporting a static 200). Schema migrations run on boot (`runStartupMigrations`, advisory-locked + idempotent) before the app serves; a migration failure exits non-zero so a schema-less task never takes traffic.
 ```
 
 ### 9.2 Non-negotiable engineering rules
@@ -280,7 +280,7 @@ Hosting: AWS (ECS Fargate + ALB + CloudFront, RDS, ElastiCache — see infra/) �
 
 ### 9.3 OAuth scopes (justify each in the writeup; add nothing speculative)
 
-`app_mentions:read, channels:history, channels:read, chat:write, chat:write.customize, commands, files:read, files:write, groups:history, groups:read, im:history, im:read, im:write, reactions:read, reactions:write, users:read, canvases:read, canvases:write, assistant:write` (assistant scope verified against inview's working manifest; `chat:write.customize` lets the F8 judge injector post the flood under the labelled "Relay Simulator 🧪" identity — CLAUDE.md 10). RTS `search:read.*` scopes are **user-token** scopes (see `../inview/docs/DECISIONS.md`).
+`assistant:write, canvases:read, canvases:write, channels:history, channels:read, chat:write, chat:write.customize, commands, files:read, files:write, groups:history, groups:read, im:history, im:read, im:write, users:read` — the exact set in `manifest.{dev,prod}.yaml`. Reconciled 2026-07-07 against actual call sites + registered handlers: **removed `app_mentions:read`, `reactions:read`, `reactions:write`** (Relay registers no `app_mention`/`reaction_added` handler and makes no `reactions.*` call — honesty rule). `groups:*` are kept deliberately: `resolveRoles()` lists `private_channel` and `app.message()` handles private-channel intake (the intake channel may be private for PII reasons). `assistant:write` verified against inview's working manifest; `chat:write.customize` lets the F8 judge injector post the flood under the labelled "Relay Simulator 🧪" identity — CLAUDE.md 10. RTS `search:read.*` scopes are **user-token** scopes (see `../inview/docs/DECISIONS.md`).
 
 ### 9.4 Data model
 

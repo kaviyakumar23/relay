@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { WebClient } from '@slack/web-api';
+import Redis from 'ioredis';
 import pg from 'pg';
 import { parseScenario, type Scenario } from '../demo/scenarios/schema';
 import { config } from './config';
@@ -18,6 +19,7 @@ import type { EventStore } from './ledger/store/eventStore';
 import { InMemoryEventStore } from './ledger/store/memoryStore';
 import { PostgresEventStore } from './ledger/store/postgresStore';
 import { InMemoryAuditLog, PgAuditLog } from './lib/auditLog';
+import { runStartupMigrations } from './lib/bootstrap';
 import { logger } from './lib/logger';
 import { createLlm, type LlmProvider } from './llm/provider';
 import { loadLocalityCoords, loadSeedVolunteers } from './match/seedData';
@@ -25,6 +27,7 @@ import { InMemoryVolunteerStore, PgVolunteerStore, type VolunteerStore } from '.
 import { type Extractor, HeuristicExtractor, LlmExtractor } from './pipeline/extract';
 import { makeIntakeJobHandler } from './pipeline/intakeJob';
 import { BullMQQueue, InlineQueue, type PipelineQueue } from './pipeline/queue';
+import { SlackTextFetcher } from './pipeline/textFetcher';
 
 // Live-mode boot (BUILD-DOC §9, §16.2). Thin by design — all logic lives in the
 // modules. Substrate is config-driven and degrades gracefully: Postgres + BullMQ
@@ -41,6 +44,19 @@ async function main(): Promise<void> {
         'For the no-infra storyboard run `npm run demo`.',
     );
     process.exit(0);
+  }
+
+  // Apply pending schema migrations BEFORE building stores or serving (review finding: a fresh
+  // ECS task used to boot "healthy" against an empty schema). Idempotent + advisory-locked so
+  // concurrent rollouts serialize. A migration failure must NOT serve a schema-less app — log
+  // and exit non-zero so the deploy fails loudly and the ALB never routes to a broken task.
+  if (config.databaseUrl) {
+    try {
+      await runStartupMigrations(config.databaseUrl);
+    } catch (err) {
+      logger.error({ err }, 'relay: startup migrations failed — refusing to serve without a schema');
+      process.exit(1);
+    }
   }
 
   const pool = config.databaseUrl ? new pg.Pool({ connectionString: config.databaseUrl }) : null;
@@ -61,8 +77,10 @@ async function main(): Promise<void> {
   // dispatch id through the same object so it sees the resolved value.
   const roles: MutableRoles = { intakeChannelId: '', dispatchChannelId: '', hqChannelId: '', judgesChannelId: '' };
 
-  // The notifier posts via its own Web client (independent of Bolt's receiver).
-  const notifier = new SlackNotifier(new WebClient(botToken), () => roles.dispatchChannelId);
+  // One bot Web client, shared by the notifier (posts) and the pipeline text fetcher (reads),
+  // both independent of Bolt's receiver.
+  const botClient = new WebClient(botToken);
+  const notifier = new SlackNotifier(botClient, () => roles.dispatchChannelId);
 
   // P-1 extractor: the real provider when a key is configured, else the deterministic
   // heuristic so intake still classifies (offline). The core pipeline is provider-agnostic.
@@ -93,9 +111,14 @@ async function main(): Promise<void> {
     contactHashKey,
     isDemo: false,
   });
+  // Zero-copy text reconstitution (invariant #5): the durable BullMQ job carries only Slack
+  // references, never the message text, so the worker RE-FETCHES the single message from Slack
+  // (conversations.history/replies) before extraction. Without this the Redis worker ran the
+  // handler with no text → every need stuck NEW/other/low and Confirm hit ILLEGAL_TRANSITION.
+  const textFetcher = new SlackTextFetcher(botClient);
   let queue: PipelineQueue;
   if (config.redisUrl) {
-    const bull = new BullMQQueue({ redisUrl: config.redisUrl, handler: jobHandler });
+    const bull = new BullMQQueue({ redisUrl: config.redisUrl, handler: jobHandler, textFetcher });
     bull.startWorker();
     queue = bull;
   } else {
@@ -142,6 +165,16 @@ async function main(): Promise<void> {
   }
   const demoResetStore = pool ? new PgDemoResetStore({ pool }) : new InMemoryDemoResetStore();
 
+  // Deep-health seam for GET /healthz: a dedicated, lazy Redis client whose ONLY job is PING
+  // (BullMQ owns its own worker connections). lazyConnect defers the socket until the first
+  // probe; a low retry ceiling + the health probe's short timeout make a dead Redis surface as
+  // 'fail' fast. An 'error' listener is mandatory — an unhandled ioredis 'error' would crash.
+  const healthRedis = config.redisUrl
+    ? new Redis(config.redisUrl, { lazyConnect: true, maxRetriesPerRequest: 1 })
+    : null;
+  healthRedis?.on('error', (err) => logger.debug({ err }, 'relay: health redis client error (probe will report fail)'));
+  const redisPing: (() => Promise<string>) | undefined = healthRedis ? () => healthRedis.ping() : undefined;
+
   const { start } = buildSlackApp({
     botToken,
     signingSecret,
@@ -170,6 +203,8 @@ async function main(): Promise<void> {
     demoScenario,
     demoResetStore,
     slackUserToken: config.slack.userToken || undefined,
+    // Short per-probe timeout keeps /healthz snappy for UptimeRobot's 5-min poll (§13.2).
+    health: { pool, redisPing, timeoutMs: 800 },
   });
 
   logger.info(

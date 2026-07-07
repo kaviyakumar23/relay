@@ -27,10 +27,15 @@ features:
       description: sitrep · report · need · volunteer · demo
       usage_hint: "sitrep | report | need | volunteer | demo start flood-1"
       should_escape: false
+# Scope/event audit 2026-07-07: reconciled against actual call sites + registered
+# handlers. REMOVED app_mentions:read (no app_mention handler), reactions:read +
+# reactions:write (no reactions.* call site, no reaction_added handler). KEPT the
+# groups:* scopes + message.groups: resolveRoles() lists private_channel via
+# conversations.list (groups:read) and app.message() handles private-channel intake
+# (groups:history + message.groups) — the intake channel may be private for PII reasons.
 oauth_config:
   scopes:
     bot:
-      - app_mentions:read
       - assistant:write
       - canvases:read
       - canvases:write
@@ -46,20 +51,16 @@ oauth_config:
       - im:history
       - im:read
       - im:write
-      - reactions:read
-      - reactions:write
       - users:read
 settings:
   event_subscriptions:
     bot_events:
       - app_home_opened
-      - app_mention
       - assistant_thread_started
       - assistant_thread_context_changed
       - message.channels
       - message.groups
       - message.im
-      - reaction_added
   interactivity:
     is_enabled: true
   org_deploy_enabled: false

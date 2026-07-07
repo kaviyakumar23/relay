@@ -212,8 +212,11 @@ export async function runIntakeJob(
   let projection = outcome.need;
   let contact: string | null = null;
 
-  // Raw text is present in practice; if it is somehow absent we skip extraction and
-  // post the plain (pre-extraction) card rather than losing the need.
+  // Raw text always arrives with the job — inline via the JobTransient, or reconstituted
+  // from Slack by the BullMQ worker's TextFetcher (processIntakeJob). Extraction runs
+  // whenever text is present; if it is somehow absent (no fetcher wired, or a deleted
+  // message → undefined) we skip extraction and post the plain (pre-extraction) card
+  // rather than losing the need.
   if (transient?.text !== undefined) {
     try {
       const extracted = await applyExtraction(outcome.needId, job, transient.text, nowMs, deps, outcome.need);
