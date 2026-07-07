@@ -292,3 +292,17 @@ expectations:
   # independent ledger recount, returns the same public ids, and leaks no PII.
   - capability: mcp
     assert: search_needs_matches_ledger
+
+  # live_hero (§F5) — the LIVE self-serve orchestrator (runLiveHeroDemo) drives the full
+  # signature chain against the real pipeline, with stub side effects + a virtual clock: the
+  # picked critical/high need reaches CLOSED, reassigned to a SECOND volunteer, with a complete
+  # evidence packet, an at-risk drift nudge fired through the real sweep, and every human-gated
+  # step carrying the demo coordinator. The live analog of evidence/hero_e2e.
+  - capability: live_hero
+    assert: hero_live_e2e
+
+  # live_hero — the App Home operations board (§F2) renders over the post-hero ledger with all
+  # its sections present: the attention list, the drifting-obligations panel, the filter row,
+  # and the config panel (verification policy + SLA table).
+  - capability: live_hero
+    assert: app_home_board

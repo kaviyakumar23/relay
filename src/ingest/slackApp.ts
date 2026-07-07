@@ -6,6 +6,7 @@ import { type AskRelayResult, askRelay } from '../assistant/askRelay';
 import { RtsClient, type RtsResolver } from '../assistant/rts';
 import { createMockRts } from '../assistant/rtsMock';
 import { compressedClockNote, type InjectorPostMessage, runFloodInjector, SIMULATOR_IDENTITY } from '../demo/injector';
+import { type LiveHeroDemoDeps, type NarrateChannel, runLiveHeroDemo } from '../demo/liveOrchestrator';
 import { type DemoResetStore, type ResetDemoResult, resetDemo } from '../demo/reset';
 import { slaDueAtIso } from '../drift/sla';
 import { needEventKey } from '../ledger/idempotency';
@@ -23,6 +24,7 @@ import type { Volunteer, VolunteerStore } from '../match/volunteerStore';
 import { generateReport, parseReportPeriod } from '../narrate/report';
 import { generateSitrep } from '../narrate/sitrep';
 import type { PipelineQueue } from '../pipeline/queue';
+import type { HomeViewOptions } from '../surfaces/appHome';
 import { buildCanvasDocument, type CanvasWriteClient, writeCanvas } from '../surfaces/canvas';
 import { buildNudgeBlocks, DELAYED_ACTION, ENROUTE_ACTION, type NudgeAck, RELEASE_ACTION } from '../surfaces/driftCard';
 import {
@@ -35,6 +37,7 @@ import {
   RECIPIENT_SUBSTITUTE_ACTION,
   SIGNOFF_ACTION,
 } from '../surfaces/evidenceModal';
+import { decodeHomeFilter, type HomeFilter } from '../surfaces/homeFilters';
 import {
   buildArchitecture,
   buildGuidedTour,
@@ -133,6 +136,10 @@ export interface SlackAppDeps {
    * buildDriftCallbacks so the button handlers and the drift sweep share one implementation.
    * Undefined disables the auto-reassign side effects (e.g. drift-less tests). */
   proposeReassign?: (need: ProjectedNeed, excludeVolunteerId?: string) => Promise<void>;
+  /** Run ONE drift sweep over the real service at the given clock (server wires the SAME closure
+   * the scheduler ticks: runDriftSweep with notifyNudge + proposeReassign). The live hero demo
+   * fires this on cue; undefined disables the scripted drift beat (it degrades to skipped). */
+  driftSweep?: (now: number) => Promise<void>;
   /** The flood scenario the judge "Run demo" button + `/relay demo start` play into #relay-intake
    * (as the 🧪 simulator). Undefined disables the judge demo (the button reports it's unconfigured). */
   demoScenario?: Scenario;
@@ -195,6 +202,15 @@ function readActionId(action: unknown): string {
   if (typeof action === 'object' && action !== null && 'action_id' in action) {
     const id = (action as { action_id: unknown }).action_id;
     return typeof id === 'string' ? id : '';
+  }
+  return '';
+}
+
+/** Safely read a button's `value` off Bolt's (union-typed) action payload. */
+function readActionValue(action: unknown): string {
+  if (typeof action === 'object' && action !== null && 'value' in action) {
+    const v = (action as { value: unknown }).value;
+    return typeof v === 'string' ? v : '';
   }
   return '';
 }
@@ -290,6 +306,8 @@ const injectSlug = (s: string): string =>
 export interface BuiltSlackApp {
   app: App;
   start: () => Promise<void>;
+  /** Re-publish every open App Home (used by the live wall-clock drift tick in src/server.ts). */
+  refreshHomes: () => Promise<void>;
 }
 
 /** The structural slice of Bolt's slash-command `respond` the sitrep/report helpers use. */
@@ -362,17 +380,6 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     );
   });
 
-  // App Home — the live operations board, scoped to the opener.
-  app.event('app_home_opened', async ({ event }) => {
-    if (event.tab && event.tab !== 'home') return;
-    try {
-      const needs = await deps.service.listNeeds();
-      await deps.notifier.publishHome(event.user, needs);
-    } catch (err) {
-      logger.warn({ err, user: event.user }, 'app_home: publish failed');
-    }
-  });
-
   // --- Live interaction handlers (Jul 6) --------------------------------------
   // Every consequential transition passes a HUMAN actor (body.user.id) so the engine's
   // gates admit it; ack is immediate and the ledger/card work runs after. Card updates
@@ -394,6 +401,101 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       logger.debug({ err }, 'error ephemeral failed');
     }
   };
+
+  // --- App Home operations board (F2) -----------------------------------------
+  // The live board is PURE over the projection; the integrator owns two bits of view state:
+  //   · homeFilters — each viewer's active board filter (a view preference, NOT ledger state).
+  //   · homeAudience — every user who has opened the home, so a ledger mutation or a drift tick
+  //     can re-publish their board. Both are small in-memory maps (rebuilt on restart).
+  const homeFilters = new Map<string, HomeFilter | null>();
+  const homeAudience = new Set<string>();
+
+  /** Resolve N-000x labels for the board (memoized per publish; falls back to #<uuid> without a store). */
+  const buildPublicIdOf = async (needs: ProjectedNeed[]): Promise<(needId: string) => string | undefined> => {
+    if (deps.store === undefined) return () => undefined;
+    const map = new Map<string, string>();
+    for (const n of needs) {
+      const pid = await deps.store.getPublicId(n.need_id);
+      if (pid !== null) map.set(n.need_id, pid);
+    }
+    return (id) => map.get(id);
+  };
+
+  /** Publish the operations board to one user with their active filter + the demo SLA clock. */
+  const publishHomeFor = async (userId: string): Promise<void> => {
+    const needs = await deps.service.listNeeds();
+    const publicIdOf = await buildPublicIdOf(needs);
+    const opts: HomeViewOptions = {
+      now: Date.now(),
+      filter: homeFilters.get(userId) ?? null,
+      slaMultiplier,
+      publicIdOf,
+    };
+    await deps.notifier.publishHome(userId, needs, opts);
+  };
+
+  /** Re-publish every open App Home (after a ledger mutation or a drift tick). Best-effort. */
+  const refreshHomes = async (): Promise<void> => {
+    for (const userId of homeAudience) {
+      try {
+        await publishHomeFor(userId);
+      } catch (err) {
+        logger.debug({ err, user: userId }, 'app_home: refresh failed');
+      }
+    }
+  };
+
+  // App Home opened → remember the opener and publish their (filtered) board.
+  app.event('app_home_opened', async ({ event }) => {
+    if (event.tab && event.tab !== 'home') return;
+    homeAudience.add(event.user);
+    try {
+      await publishHomeFor(event.user);
+    } catch (err) {
+      logger.warn({ err, user: event.user }, 'app_home: publish failed');
+    }
+  });
+
+  // A filter button → store the viewer's active filter (or clear it on "All") and re-publish
+  // just their board. The encoded value round-trips through decodeHomeFilter (homeFilters.ts).
+  app.action(/^home_filter:/, async ({ ack, body, action }) => {
+    await ack();
+    const ctx = readBodyContext(body);
+    if (!ctx.user) return;
+    const encoded = readActionValue(action) || parseActionId(readActionId(action)).id;
+    const filter = decodeHomeFilter(encoded);
+    if (filter === null) homeFilters.delete(ctx.user);
+    else homeFilters.set(ctx.user, filter);
+    homeAudience.add(ctx.user);
+    try {
+      await publishHomeFor(ctx.user);
+    } catch (err) {
+      logger.debug({ err, user: ctx.user }, 'app_home: filter republish failed');
+    }
+  });
+
+  // A View button on the board → DM the clicking user a deep link to the need's source thread
+  // (the button value carries the permalink; App Home block actions have no channel to post an
+  // ephemeral into, so we open the IM instead). Falls back to pointing at #relay-dispatch.
+  app.action(/^home_view:/, async ({ ack, body, action }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const ctx = readBodyContext(body);
+    if (!needId || !ctx.user) return;
+    const value = readActionValue(action);
+    const publicId = await resolvePublicId(needId);
+    const dispatch = deps.roles.dispatchChannelId;
+    const text = value.startsWith('http')
+      ? `${publicId} — open its report thread: ${value}`
+      : dispatch !== ''
+        ? `${publicId} — find its dispatch card in <#${dispatch}>.`
+        : `${publicId} — its dispatch card is in #relay-dispatch.`;
+    try {
+      await deps.notifier.postDirect(ctx.user, text, [section(text)]);
+    } catch (err) {
+      logger.debug({ err, need_id: needId }, 'home_view deep-link DM failed');
+    }
+  });
 
   // Re-render a nudge DM in place after the volunteer taps a button: same heading, an ack
   // line, no more buttons. Best-effort — a failed chat.update never breaks the transition.
@@ -477,6 +579,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     } catch (err) {
       logger.error({ err, need_id: needId }, 'match after confirm failed');
     }
+    void refreshHomes(); // the board's counters + attention list moved (TRIAGED → OPEN)
   });
 
   // The card's plain "Assign" surfaces the volunteer slate once the need is OPEN (from
@@ -576,6 +679,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         extraBlocks: [context(`✅ *Assigned to ${escapeMrkdwn(name)}*`)],
       });
     }
+    void refreshHomes(); // OPEN → CLAIMED, and a new obligation joins the drift panel
   });
 
   // Reveal beneficiary contact — the ONE path allowed to surface the number. Ephemeral
@@ -708,6 +812,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         logger.error({ err, need_id: needId }, 'release: proposeReassign failed');
       }
     }
+    void refreshHomes(); // released back to OPEN — it returns to the attention list
   });
 
   // Coordinator one-click reassignment from a proposal card → the obligation moves to the new
@@ -765,6 +870,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         extraBlocks: [context(`🔄 *Reassigned to ${escapeMrkdwn(name)}* — fresh SLA clock started.`)],
       });
     }
+    void refreshHomes(); // the obligation moved to a new volunteer with a fresh SLA
   });
 
   // --- Evidence / verification handlers (Jul 8) -------------------------------
@@ -988,6 +1094,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       },
     );
     await renderEvidenceCard(needId, body);
+    void refreshHomes(); // VERIFIED → CLOSED bumps the "verified in the last 24h" counter
   });
 
   // --- Judge experience (F8) --------------------------------------------------
@@ -1019,43 +1126,87 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     }
   };
 
-  /** Play the flood scenario into #relay-intake as the 🧪 simulator, feeding the real pipeline. */
-  const runJudgeDemo = async (): Promise<void> => {
-    const scenario = deps.demoScenario;
+  // Post one simulated intake message into #relay-intake as the 🧪 persona, then feed the SAME
+  // intake path a real user message takes (the round-tripped bot_message event is dropped by the
+  // subtype filter, and needCreatedKey would collapse it anyway — so no double processing).
+  const injectorPostMessage: InjectorPostMessage = async (text, { personaName }) => {
     const channel = deps.roles.intakeChannelId;
-    if (scenario === undefined || channel === '') return;
-    const postMessage: InjectorPostMessage = async (text, { personaName }) => {
-      const res = await app.client.chat.postMessage({
-        channel,
+    if (channel === '') return;
+    const res = await app.client.chat.postMessage({ channel, text, username: personaName, icon_emoji: ':test_tube:' });
+    const ts = typeof res.ts === 'string' ? res.ts : '';
+    if (ts === '') return;
+    let permalink: string | undefined;
+    try {
+      permalink = (await app.client.chat.getPermalink({ channel, message_ts: ts })).permalink;
+    } catch (err) {
+      logger.debug({ err }, 'judge inject: getPermalink failed (non-fatal)');
+    }
+    await handleIntakeMessage(
+      {
+        eventId: `judge-inject:${channel}:${ts}`,
+        teamId: '',
+        channelId: channel,
+        messageTs: ts,
+        userId: `sim_${injectSlug(personaName)}`,
         text,
-        username: personaName,
-        icon_emoji: ':test_tube:',
-      });
-      const ts = typeof res.ts === 'string' ? res.ts : '';
-      if (ts === '') return;
-      let permalink: string | undefined;
-      try {
-        permalink = (await app.client.chat.getPermalink({ channel, message_ts: ts })).permalink;
-      } catch (err) {
-        logger.debug({ err }, 'judge inject: getPermalink failed (non-fatal)');
-      }
-      // Feed the SAME intake path a real user message takes. The round-tripped bot_message event is
-      // dropped by the subtype filter, and needCreatedKey would collapse it regardless — so there is
-      // no double processing: judges see the 🧪 flood; the pipeline triages it into #relay-dispatch.
-      await handleIntakeMessage(
-        {
-          eventId: `judge-inject:${channel}:${ts}`,
-          teamId: '',
-          channelId: channel,
-          messageTs: ts,
-          userId: `sim_${injectSlug(personaName)}`,
-          text,
-          permalink,
-        },
-        { queue: deps.queue, dedupe: deps.dedupe, isIntakeChannel },
-      );
+        permalink,
+      },
+      { queue: deps.queue, dedupe: deps.dedupe, isIntakeChannel },
+    );
+  };
+
+  /** The channel a hero-narration line lands in. There is no separate volunteers channel — the
+   * per-volunteer nudge itself is a DM fired by the drift sweep; the 'volunteers' narration lines
+   * (context for judges) surface in #relay-dispatch alongside the dispatch traffic. */
+  const narrateChannelFor = (channel: NarrateChannel): string => {
+    if (channel === 'hq') return deps.roles.hqChannelId || deps.roles.dispatchChannelId;
+    return deps.roles.dispatchChannelId || deps.roles.intakeChannelId;
+  };
+
+  /**
+   * The LIVE self-serve hero demo (BUILD-DOC §F5, the never-cut hero moment). Drives the FULL
+   * signature sequence — flood → triage → assign → drift nudge → release/reassign → deliver →
+   * verify → close — against the REAL ledger + pipeline, narrated as the 🧪 simulator, so a judge
+   * who presses "Run flood demo" watches the whole arc happen live (not just the 14 intake posts).
+   * Fire-and-forget after ack; every consequential transition carries the clicking human as actor.
+   */
+  const runLiveHero = async (demoActorId: string): Promise<void> => {
+    const scenario = deps.demoScenario;
+    if (scenario === undefined || deps.roles.intakeChannelId === '') return;
+    const heroDeps: LiveHeroDemoDeps = {
+      scenario,
+      service: deps.service,
+      volunteerStore: deps.volunteerStore,
+      localities: deps.localities,
+      postIntake: async ({ scenario: s }) => {
+        await runFloodInjector({ scenario: s, postMessage: injectorPostMessage });
+      },
+      driftSweep: async (now) => {
+        if (deps.driftSweep !== undefined) await deps.driftSweep(now);
+      },
+      narrate: async (channel, text) => {
+        const target = narrateChannelFor(channel);
+        if (target === '') return;
+        try {
+          await app.client.chat.postMessage({
+            channel: target,
+            text,
+            username: SIMULATOR_IDENTITY,
+            icon_emoji: ':test_tube:',
+          });
+        } catch (err) {
+          logger.debug({ err }, 'live hero: narrate failed');
+        }
+      },
+      pickTarget: async (predicate) => (await deps.service.listNeeds(Date.now())).find(predicate) ?? null,
+      resolvePublicId,
+      now: () => Date.now(),
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      demoActor: { type: 'human', id: demoActorId },
     };
-    await runFloodInjector({ scenario, postMessage });
+    const { beats } = await runLiveHeroDemo(heroDeps);
+    logger.info({ beats }, 'live hero demo complete');
+    await refreshHomes();
   };
 
   /** Idempotent demo teardown: purge is_demo state (when a store is wired), republish App Home for
@@ -1063,8 +1214,9 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
   const runJudgeReset = async (userId?: string): Promise<ResetDemoResult> => {
     const republishHome = async (): Promise<void> => {
       if (userId === undefined) return;
+      homeAudience.add(userId);
       try {
-        await deps.notifier.publishHome(userId, await deps.service.listNeeds());
+        await publishHomeFor(userId);
       } catch (err) {
         logger.debug({ err }, 'judge reset: republish home failed');
       }
@@ -1083,14 +1235,17 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       return;
     }
     const count = scenario.steps.filter((s) => s.kind === 'intake_message').length;
+    const actorId = ctx.user ?? 'DEMO_COORDINATOR';
+    if (ctx.user !== undefined) homeAudience.add(ctx.user);
     await notifyError(
       ctx,
-      `▶ Flood demo started — ${count} simulated reports (🧪 ${SIMULATOR_IDENTITY}) will arrive in ` +
-        `<#${deps.roles.intakeChannelId}> over ~40s, then flow through triage → dispatch. ` +
+      `▶ Flood demo starting — ${count} simulated reports (🧪 ${SIMULATOR_IDENTITY}) arrive in ` +
+        `<#${deps.roles.intakeChannelId}>, then Relay drives the full arc live: triage → assign → ` +
+        `SLA drift → one-click reassign → evidence close, narrated as it happens. ` +
         compressedClockNote(scenario.sla_multiplier),
     );
-    // Fire-and-forget: the injector trickles for ~40s; never block the ack window on it.
-    void runJudgeDemo().catch((err) => logger.error({ err }, 'judge demo run failed'));
+    // Fire-and-forget after ack (Ack < 3s, work async): the self-serve hero runs for a few minutes.
+    void runLiveHero(actorId).catch((err) => logger.error({ err }, 'judge live hero run failed'));
   });
 
   app.action(JUDGE_RESET, async ({ ack, body }) => {
@@ -1258,13 +1413,15 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         return;
       }
       const count = scenario.steps.filter((s) => s.kind === 'intake_message').length;
+      homeAudience.add(userId);
       await respond({
         response_type: 'ephemeral',
         text:
-          `▶ Flood demo started — ${count} simulated reports (🧪 ${SIMULATOR_IDENTITY}) will trickle into ` +
-          `<#${deps.roles.intakeChannelId}> as they triage into #relay-dispatch. ${compressedClockNote(scenario.sla_multiplier)}`,
+          `▶ Flood demo starting — ${count} simulated reports (🧪 ${SIMULATOR_IDENTITY}) arrive in ` +
+          `<#${deps.roles.intakeChannelId}>, then Relay drives the full arc live: triage → assign → SLA drift → ` +
+          `one-click reassign → evidence close, narrated as it happens. ${compressedClockNote(scenario.sla_multiplier)}`,
       });
-      void runJudgeDemo().catch((err) => logger.error({ err }, 'demo start command failed'));
+      void runLiveHero(userId).catch((err) => logger.error({ err }, 'demo start command live hero failed'));
     } else if (which === 'reset') {
       const result = await runJudgeReset(userId);
       const summary = result.noop
@@ -1368,5 +1525,5 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     await publishJudgeWelcome();
   };
 
-  return { app, start };
+  return { app, start, refreshHomes };
 }

@@ -14,7 +14,7 @@ import { NeedService } from '../ledger/needService';
 import { DEFAULT_RISK_WINDOW_MS } from '../ledger/projection';
 import { meetsVerificationPolicy } from '../ledger/stateMachine';
 import { InMemoryEventStore } from '../ledger/store/memoryStore';
-import { type NeedState, type ProjectedNeed, TERMINAL_STATES } from '../ledger/types';
+import { type Actor, type NeedState, type ProjectedNeed, TERMINAL_STATES } from '../ledger/types';
 import { InMemoryContactVault } from '../lib/vault';
 import { MockLlm } from '../llm/mock';
 import { buildSitrepRequest } from '../llm/prompts/p5-sitrep';
@@ -31,8 +31,10 @@ import { buildTokenMap, narrateWithIntegrity, validateNumbers } from '../narrate
 import { HeuristicExtractor } from '../pipeline/extract';
 import { makeIntakeJobHandler } from '../pipeline/intakeJob';
 import { InlineQueue } from '../pipeline/queue';
+import { appHomeView } from '../surfaces/appHome';
 import { buildMatchBlocks, type MatchNeed, type RankedCandidate } from '../surfaces/matchCard';
 import { runFloodInjector, SIMULATOR_MARK } from './injector';
+import { HERO_BEATS, type LiveHeroDemoDeps, runLiveHeroDemo } from './liveOrchestrator';
 import { InMemoryDemoResetStore, resetDemo } from './reset';
 
 // The hermetic storyboard driver (BUILD-DOC §12, §16.2). It assembles the EXACT
@@ -1189,10 +1191,136 @@ export async function evaluateMcp(scenario: Scenario, a: HermeticAssembly): Prom
   return results;
 }
 
+/**
+ * Evaluate the LIVE self-serve hero (§F5) — the live analog of evidence/hero_e2e. On a FRESH,
+ * isolated assembly (so it never disturbs the shared driver ledger), it plays the flood then runs
+ * runLiveHeroDemo with stub side effects + a virtual clock: recording narrate/nudges, a pickTarget
+ * over listNeeds, the REAL runDriftSweep behind recording callbacks, and a no-op sleep. It proves
+ * the SAME orchestrator the live "Run flood demo" button fires drives the picked critical/high need
+ * all the way to CLOSED — reassigned to a SECOND volunteer, with a complete evidence packet, an
+ * at-risk nudge from the real sweep, and every human-gated step carrying the demo coordinator. It
+ * then renders the App Home board over that post-hero ledger and asserts every §F2 section is present.
+ * Reads the ledger / the rendered view back — never fabricates a pass.
+ */
+export async function evaluateLiveHero(scenario: Scenario): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const heroExp = scenario.expectations.find((e) => e.assert === 'hero_live_e2e');
+  const homeExp = scenario.expectations.find((e) => e.assert === 'app_home_board');
+  if (heroExp === undefined && homeExp === undefined) return results;
+
+  // A fresh assembly + the flood, so the orchestrator drives the REAL pipeline deterministically.
+  const a = buildHermeticAssembly();
+  await runScenario(scenario, a);
+
+  const needs0 = await a.service.listNeeds();
+  const base = Math.max(BASE_CLOCK_MS, ...needs0.map((n) => Date.parse(n.created_at))) + 60_000;
+  const resolvePublicId = async (id: string): Promise<string> => (await a.store.getPublicId(id)) ?? id;
+  const { notifyNudge, proposeReassign } = buildDriftCallbacks({
+    service: a.service,
+    notifier: a.notifier,
+    volunteerStore: a.volunteerStore,
+    localities: a.localities,
+    resolvePublicId,
+  });
+
+  const nudges: Array<{ id: string; kind: string }> = [];
+  let selected: string | null = null;
+  const demoActor: Actor = { type: 'human', id: 'DEMO_COORDINATOR' };
+  const deps: LiveHeroDemoDeps = {
+    scenario,
+    service: a.service,
+    volunteerStore: a.volunteerStore,
+    localities: a.localities,
+    postIntake: async () => {}, // the flood is already injected above (this is the driver, not live Slack)
+    driftSweep: async (now) => {
+      await runDriftSweep({
+        service: a.service,
+        listNeeds: (n) => a.service.listNeeds(n),
+        notifyNudge: async (need, kind) => {
+          nudges.push({ id: need.need_id, kind });
+          await notifyNudge(need, kind);
+        },
+        proposeReassign,
+        now,
+      });
+    },
+    narrate: async () => {},
+    pickTarget: async (pred) => {
+      const found = (await a.service.listNeeds(base)).find(pred) ?? null;
+      if (found !== null && selected === null) selected = found.need_id;
+      return found;
+    },
+    resolvePublicId,
+    now: () => base,
+    sleep: async () => {},
+    demoActor,
+  };
+
+  const { beats } = await runLiveHeroDemo(deps);
+
+  if (heroExp !== undefined) {
+    const targetId = selected;
+    const finalNow = base + 10_000_000;
+    const target = targetId === null ? null : await a.service.getNeed(targetId, finalNow);
+    const events = targetId === null ? [] : await a.service.getEvents(targetId);
+    const assignVols = events.flatMap((e) => (isEvent(e, 'Assigned') ? [e.payload.volunteer_id] : []));
+    const kinds = new Set((target?.evidence ?? []).map((e) => e.kind));
+    const packetComplete = (['photo', 'locality_confirm', 'recipient_confirm', 'coordinator_signoff'] as const).every(
+      (k) => kinds.has(k),
+    );
+    const reassignedToSecond =
+      assignVols.length === 2 && assignVols[1] !== assignVols[0] && target?.assigned_volunteer_id === assignVols[1];
+    const gateViolations = events.filter((e) => HUMAN_GATED_TYPES.has(e.type) && e.actor.type !== 'human');
+    const atRiskNudged = targetId !== null && nudges.some((n) => n.id === targetId && n.kind === 'at_risk');
+    const beatsOk =
+      beats[0] === HERO_BEATS.intake && beats.includes(HERO_BEATS.reassign) && beats.includes(HERO_BEATS.deliver);
+    const pass =
+      target?.state === 'CLOSED' &&
+      packetComplete &&
+      reassignedToSecond &&
+      atRiskNudged &&
+      gateViolations.length === 0 &&
+      beatsOk;
+    results.push({
+      capability: 'live_hero',
+      assert: 'hero_live_e2e',
+      pass,
+      detail: pass
+        ? `runLiveHeroDemo drove ${await resolvePublicId(targetId ?? '')} to CLOSED, reassigned ${assignVols[0]}→${assignVols[1]}, complete packet, at-risk nudge fired, all human-gated steps signed by ${demoActor.id}`
+        : `state=${target?.state ?? 'missing'}, packet=${packetComplete}, reassignedToSecond=${reassignedToSecond}, atRiskNudged=${atRiskNudged}, gateViolations=${gateViolations.map((e) => e.type).join(',') || 'none'}, beats=${beats.join(' ')}`,
+    });
+  }
+
+  if (homeExp !== undefined) {
+    const needs = await a.service.listNeeds(base);
+    const dump = JSON.stringify(appHomeView(needs, { now: base, slaMultiplier: scenario.sla_multiplier }));
+    const checks: Array<[string, boolean]> = [
+      ['attention list', dump.includes('Needs your attention')],
+      ['drift panel', dump.includes('Drifting obligations')],
+      ['filters', dump.includes('Filter the board')],
+      ['verification policy', dump.includes('Verification policy')],
+      ['SLA table', dump.includes('SLA clock')],
+    ];
+    const missing = checks.filter(([, ok]) => !ok).map(([name]) => name);
+    const pass = missing.length === 0;
+    results.push({
+      capability: 'live_hero',
+      assert: 'app_home_board',
+      pass,
+      detail: pass
+        ? `App Home renders all §F2 sections over the post-hero ledger (attention list, drift panel, filters, config panel)`
+        : `missing board section(s): ${missing.join(', ')}`,
+    });
+  }
+
+  return results;
+}
+
 /** Asserts the driver evaluates today: the walking skeleton, extraction-backed triage,
  * dedupe auto-detection, the deterministic match slate, the drift/reassign hero arc, the
- * evidence/verification finale, the sitrep/report narration guarantees (F6/F7), and the F8
- * judge experience + P1 assistant/MCP flourishes. Everything else is a documented SKIP. */
+ * evidence/verification finale, the sitrep/report narration guarantees (F6/F7), the F8
+ * judge experience + P1 assistant/MCP flourishes, and the live self-serve hero (§F5).
+ * Everything else is a documented SKIP. */
 const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'needs_created_count',
   'needs_review_count',
@@ -1212,6 +1340,8 @@ const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'answers_open_criticals',
   'refuses_out_of_scope',
   'search_needs_matches_ledger',
+  'hero_live_e2e',
+  'app_home_board',
 ]);
 
 export interface SkippedExpectation {

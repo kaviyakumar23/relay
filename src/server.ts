@@ -137,22 +137,27 @@ async function main(): Promise<void> {
     llm: rationaleLlm,
   });
 
+  // One drift pass over the real ledger at clock `now` — the SAME closure the scheduler ticks,
+  // the in-process wall-clock tick fires (below), and the live hero demo runs on cue. Idempotent
+  // through the ledger's deterministic Nudged keys, so overlapping callers never double-notify.
+  const driftSweepNow = async (now: number): Promise<void> => {
+    await runDriftSweep({ service, listNeeds: (n) => service.listNeeds(n), notifyNudge, proposeReassign, now });
+  };
+
   // The 60s drift worker (§F4): durable BullMQ tick when REDIS_URL is set, else the timer-free
-  // in-memory scheduler (which only fires when a caller advances its virtual clock — the demo
-  // runner does; live-without-Redis therefore has no autonomous drift, by design).
+  // in-memory scheduler. In live mode the in-process wall-clock tick below is the PRIMARY drift
+  // driver (robust for a single-task Fargate service — no Redis needed); the BullMQ scheduler,
+  // when present, is a durable belt that fires the same idempotent sweep.
   const scheduler: Scheduler = config.redisUrl
     ? new BullmqScheduler({ redisUrl: config.redisUrl })
     : new InMemoryScheduler();
   scheduler.start(async (now) => {
     try {
-      await runDriftSweep({ service, listNeeds: (n) => service.listNeeds(n), notifyNudge, proposeReassign, now });
+      await driftSweepNow(now);
     } catch (err) {
       logger.error({ err }, 'drift sweep failed');
     }
   });
-  if (!config.redisUrl) {
-    logger.warn('relay: no REDIS_URL — drift worker will not tick autonomously (set REDIS_URL for live SLA drift)');
-  }
 
   // F8 judge experience: the flood scenario the "Run demo" button + `/relay demo start` play, and
   // the reset seam (Postgres purge in prod, an in-memory stand-in offline — a true purge of the
@@ -175,7 +180,7 @@ async function main(): Promise<void> {
   healthRedis?.on('error', (err) => logger.debug({ err }, 'relay: health redis client error (probe will report fail)'));
   const redisPing: (() => Promise<string>) | undefined = healthRedis ? () => healthRedis.ping() : undefined;
 
-  const { start } = buildSlackApp({
+  const { start, refreshHomes } = buildSlackApp({
     botToken,
     signingSecret,
     appToken: appToken || undefined,
@@ -200,6 +205,7 @@ async function main(): Promise<void> {
     isDemo: false,
     slaMultiplier: config.slaMultiplier,
     proposeReassign,
+    driftSweep: driftSweepNow,
     demoScenario,
     demoResetStore,
     slackUserToken: config.slack.userToken || undefined,
@@ -218,6 +224,36 @@ async function main(): Promise<void> {
     'relay: booting live mode',
   );
   await start();
+
+  // Live wall-clock drift tick (§F4). We are past the `canRunLive` guard, so this ONLY runs in a
+  // real deployment (never in hermetic tests or `npm run demo`, which use the virtual-clock
+  // scheduler + injected sleeps). A single in-process interval is the robust choice for a
+  // single-task Fargate service: it needs no Redis, so autonomous SLA drift + App Home refresh
+  // fire even in the memory/inline substrate. Every tick runs the idempotent sweep, then
+  // re-publishes each open App Home so drifting obligations surface without a manual refresh.
+  const DRIFT_TICK_MS = 30_000;
+  const driftTick = setInterval(() => {
+    void (async () => {
+      try {
+        await driftSweepNow(Date.now());
+        await refreshHomes();
+      } catch (err) {
+        logger.error({ err }, 'relay: drift tick failed');
+      }
+    })();
+  }, DRIFT_TICK_MS);
+  // Don't let the interval by itself hold the process open (Bolt's server already does).
+  driftTick.unref?.();
+  logger.info({ everyMs: DRIFT_TICK_MS }, 'relay: wall-clock drift tick started');
+
+  // Graceful shutdown (Fargate sends SIGTERM): stop the tick + release scheduler connections.
+  const shutdown = (signal: string): void => {
+    logger.info({ signal }, 'relay: shutting down');
+    clearInterval(driftTick);
+    void scheduler.stop().finally(() => process.exit(0));
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 main().catch((err) => {

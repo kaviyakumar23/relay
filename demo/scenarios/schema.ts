@@ -112,6 +112,7 @@ export const capabilitySchema = z.enum([
   'judge',
   'assistant',
   'mcp',
+  'live_hero',
 ]);
 export type Capability = z.infer<typeof capabilitySchema>;
 
@@ -130,6 +131,9 @@ export const ASSERT_CATALOG = {
   judge: ['injector_posts_as_simulator', 'reset_idempotent'],
   assistant: ['answers_open_criticals', 'refuses_out_of_scope'],
   mcp: ['search_needs_matches_ledger'],
+  // The LIVE self-serve hero (§F5): runLiveHeroDemo drives the full chain against the real
+  // pipeline (the live analog of evidence/hero_e2e), and the App Home board renders over it.
+  live_hero: ['hero_live_e2e', 'app_home_board'],
 } as const satisfies Record<Capability, readonly string[]>;
 
 const countParams = z.object({ count: z.number().int().nonnegative() });
@@ -222,6 +226,20 @@ export const expectationSchema = z.discriminatedUnion('assert', [
   z.object({
     capability: z.literal('mcp'),
     assert: z.literal('search_needs_matches_ledger'),
+    params: z.object({}).optional(),
+  }),
+  // live_hero — runLiveHeroDemo drives the full chain (against the real pipeline, with stub side
+  // effects + a virtual clock) to CLOSED, reassigned to a SECOND volunteer, with a complete packet.
+  z.object({
+    capability: z.literal('live_hero'),
+    assert: z.literal('hero_live_e2e'),
+    params: z.object({}).optional(),
+  }),
+  // live_hero — the App Home operations board renders over the post-hero ledger with all its
+  // sections (attention list, drift panel, filters, config panel).
+  z.object({
+    capability: z.literal('live_hero'),
+    assert: z.literal('app_home_board'),
     params: z.object({}).optional(),
   }),
 ]);

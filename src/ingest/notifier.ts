@@ -1,6 +1,6 @@
 import type { NeedEvent } from '../ledger/events';
 import type { ProjectedNeed } from '../ledger/types';
-import { appHomeView } from '../surfaces/appHome';
+import { appHomeView, type HomeViewOptions } from '../surfaces/appHome';
 import { dispatchCard } from '../surfaces/needCard';
 import type { SlackBlock } from '../surfaces/primitives';
 
@@ -42,8 +42,9 @@ export interface Notifier {
   postDispatchCard(need: DispatchTarget, projection: ProjectedNeed, opts?: CardRenderOptions): Promise<CardRef>;
   /** Re-render an existing dispatch card in place (e.g. after triage / match). */
   updateCard(ref: CardRef, need: DispatchTarget, projection: ProjectedNeed, opts?: CardRenderOptions): Promise<void>;
-  /** Publish the App Home operations board for a user. */
-  publishHome(userId: string, needs: ProjectedNeed[]): Promise<void>;
+  /** Publish the App Home operations board for a user. `opts` threads the viewer's active
+   * filter, the demo SLA multiplier, an as-of clock, and the N-000x label resolver (§F2). */
+  publishHome(userId: string, needs: ProjectedNeed[], opts?: HomeViewOptions): Promise<void>;
   /** Ephemeral notice to one user in a channel (e.g. "that button ships in triage"). */
   postEphemeral(args: { channel: string; user: string; text: string }): Promise<void>;
   /** DM a user directly (Slack opens the IM by user id). Used for drift nudges. */
@@ -111,8 +112,8 @@ export class SlackNotifier implements Notifier {
     });
   }
 
-  async publishHome(userId: string, needs: ProjectedNeed[]): Promise<void> {
-    await this.client.views.publish({ user_id: userId, view: appHomeView(needs) });
+  async publishHome(userId: string, needs: ProjectedNeed[], opts?: HomeViewOptions): Promise<void> {
+    await this.client.views.publish({ user_id: userId, view: appHomeView(needs, opts) });
   }
 
   async postEphemeral(args: { channel: string; user: string; text: string }): Promise<void> {
@@ -159,6 +160,8 @@ export interface RecordedUpdate {
 export interface RecordedHome {
   userId: string;
   count: number;
+  /** The view options the board was published with (active filter etc.), for assertions. */
+  opts?: HomeViewOptions;
 }
 
 export interface RecordedEphemeral {
@@ -233,8 +236,8 @@ export class RecordingNotifier implements Notifier {
     });
   }
 
-  async publishHome(userId: string, needs: ProjectedNeed[]): Promise<void> {
-    this.homes.push({ userId, count: needs.length });
+  async publishHome(userId: string, needs: ProjectedNeed[], opts?: HomeViewOptions): Promise<void> {
+    this.homes.push({ userId, count: needs.length, opts });
   }
 
   async postEphemeral(args: { channel: string; user: string; text: string }): Promise<void> {

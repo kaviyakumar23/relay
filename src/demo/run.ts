@@ -7,6 +7,7 @@ import {
   evaluateDrift,
   evaluateEvidence,
   evaluateJudge,
+  evaluateLiveHero,
   evaluateMatch,
   evaluateMcp,
   evaluateReport,
@@ -58,6 +59,8 @@ async function main(): Promise<number> {
     ...(await evaluateJudge(scenario, assembly)),
     ...(await evaluateAssistant(scenario, assembly)),
     ...(await evaluateMcp(scenario, assembly)),
+    // The LIVE self-serve hero (§F5) — runLiveHeroDemo end-to-end on a fresh, isolated assembly.
+    ...(await evaluateLiveHero(scenario)),
   ];
   let failures = 0;
   for (const r of results) {
