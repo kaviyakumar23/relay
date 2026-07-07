@@ -25,7 +25,14 @@ import type { Citation, RtsReference, RtsResolver } from './rts';
 // a ProjectedNeed). RTS results are ephemeral (CLAUDE.md invariant 9) — used at query time,
 // scrubbed, never persisted here.
 
-export type AskIntent = 'open-criticals' | 'by-locality' | 'drifting' | 'sitrep' | 'other' | 'out-of-scope';
+export type AskIntent =
+  | 'open-criticals'
+  | 'by-locality'
+  | 'drifting'
+  | 'sitrep'
+  | 'other'
+  | 'out-of-scope'
+  | 'emergency';
 
 export interface AnswerCitation {
   label: string;
@@ -59,6 +66,52 @@ export interface AskRelayResult {
 const MAX_ROWS = 12;
 const REFUSAL =
   'I track relief operations, not general questions. Ask me about open needs, criticals, a specific locality, drift and SLA risk, or the live sitrep.';
+
+// --- emergency-dispatch safety refusal (BUILD-DOC §11.3) --------------------------------
+// Relay coordinates volunteers; it does NOT dispatch emergency services. If a coordinator asks
+// Relay to call 911 / 108 / an ambulance, or whether this is an emergency line, we must say so
+// plainly and redirect to the real emergency number — never answer from the ledger. This is a
+// DETERMINISTIC pre-check (runs before the scope gate and before any LLM call) so it holds
+// identically with or without an LLM key; the P-7 system prompt reinforces it as defense-in-depth.
+
+const EMERGENCY_RESPONSE =
+  'Relay coordinates volunteer relief inside this workspace — it is not an emergency service. For a life-threatening emergency contact your local emergency number directly.';
+
+/** Emergency / dispatch phrases. A bare mention here is enough — the safe failure mode is to
+ * redirect to the real emergency number, never to serve a ledger answer. */
+const EMERGENCY_PHRASES: readonly string[] = [
+  'emergency service',
+  'emergency services',
+  'emergency number',
+  'emergency line',
+  'emergency hotline',
+  'emergency helpline',
+  'emergency responder',
+  'emergency dispatch',
+  'dispatch emergency',
+  'call emergency',
+  'ambulance',
+  'paramedic',
+  'fire brigade',
+  'fire department',
+];
+
+/** Public emergency numbers (IN + intl): ambulance 108/102, unified 112, police 100, fire 101,
+ * US/other 911/999/000. Matched only next to a dialling verb so a bare quantity never trips. */
+const EMERGENCY_NUMBERS: ReadonlySet<string> = new Set(['911', '108', '112', '100', '101', '102', '999', '000']);
+const DIAL_VERB_RE = /\b(call|calling|dial|dialling|dialing|ring|phone)\b/;
+
+/** True when the question is about calling/dispatching emergency services or whether Relay is an
+ * emergency line. Deterministic — keyword/number intent only, no model. */
+function isEmergencyDispatchQuestion(question: string): boolean {
+  const t = question.toLowerCase();
+  if (EMERGENCY_PHRASES.some((p) => t.includes(p))) return true;
+  // "call/dial <emergency number>" — the dialling verb keeps "100 meals served" from tripping.
+  if (DIAL_VERB_RE.test(t)) {
+    for (const n of t.match(/\d{3,4}/g) ?? []) if (EMERGENCY_NUMBERS.has(n)) return true;
+  }
+  return false;
+}
 
 // --- locality name resolution (reverse of geocode's name/alias → id) --------------------
 
@@ -384,6 +437,14 @@ function withFieldContext(answer: string, rts: Citation[]): string {
  */
 export async function askRelay(args: AskRelayArgs): Promise<AskRelayResult> {
   const now = args.now ?? Date.now();
+
+  // 0) Safety pre-check — an emergency-dispatch question is answered with the safety refusal and
+  // NEVER from the ledger. Runs first (before scope + before any LLM call) so it is deterministic
+  // and holds with no LLM key. No ledger data, no citations.
+  if (isEmergencyDispatchQuestion(args.question)) {
+    return { answer: EMERGENCY_RESPONSE, citations: [], source: 'template', usedRts: false, intent: 'emergency' };
+  }
+
   const locality = detectLocality(args.question);
 
   // 1) Scope gate — cheap short-circuit before any ledger/RTS work.

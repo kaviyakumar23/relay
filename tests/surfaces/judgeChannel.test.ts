@@ -3,6 +3,7 @@ import {
   buildArchitecture,
   buildGuidedTour,
   buildJudgeWelcome,
+  EVAL_METRICS,
   JUDGE_ARCH,
   JUDGE_RESET,
   JUDGE_RUN_DEMO,
@@ -75,5 +76,25 @@ describe('buildArchitecture', () => {
     const text = dump(buildArchitecture());
     expect(text).toContain('github.com');
     expect(text).toContain('append-only');
+  });
+
+  it('surfaces the measured, reproducible eval numbers for judges', () => {
+    const text = dump(buildArchitecture());
+    // The three honest metrics + the frozen set size + the reproduce command.
+    expect(text).toContain('86.1%');
+    expect(text).toContain('100%');
+    expect(text).toContain('40-message');
+    expect(text).toContain('npm run eval');
+    // Frame as measured, not claimed.
+    expect(text.toLowerCase()).toContain('measured');
+  });
+
+  it('exposes exactly the three eval metrics, each with a value + reproducible detail', () => {
+    expect(EVAL_METRICS).toHaveLength(3);
+    for (const m of EVAL_METRICS) {
+      expect(m.value).toMatch(/%$/);
+      expect(m.label.length).toBeGreaterThan(0);
+      expect(m.detail.length).toBeGreaterThan(0);
+    }
   });
 });

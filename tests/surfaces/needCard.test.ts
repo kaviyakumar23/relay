@@ -226,4 +226,44 @@ describe('dispatchCard — evidence / verification flow (§F5)', () => {
     expect(dump).not.toContain('Verified · Closed');
     expect(dump).not.toContain('need_reveal');
   });
+
+  it('adds Edit + Escalate to the committed action row (BUILD-DOC §F2) while in flight', () => {
+    for (const state of ['CLAIMED', 'IN_PROGRESS', 'DELIVERED_UNVERIFIED'] as const) {
+      const kinds: EvidenceKind[] = state === 'DELIVERED_UNVERIFIED' ? ['photo', 'locality_confirm'] : [];
+      const ids = actionIdsOf(dispatchCard('N-0001', deliveringNeed(state, kinds)));
+      expect(ids).toContainEqual({ action: 'need_edit', id: 'need_e' });
+      expect(ids).toContainEqual({ action: 'need_escalate', id: 'need_e' });
+    }
+  });
+
+  it('drops Edit + Escalate once the loop is closed (VERIFIED / CLOSED)', () => {
+    for (const state of ['VERIFIED', 'CLOSED'] as const) {
+      const dump = jsonOf(
+        dispatchCard(
+          'N-0001',
+          deliveringNeed(state, ['photo', 'locality_confirm', 'recipient_confirm', 'coordinator_signoff']),
+        ),
+      );
+      expect(dump).not.toContain('need_edit');
+      expect(dump).not.toContain('need_escalate');
+    }
+  });
+});
+
+describe('dispatchCard — visual hierarchy', () => {
+  const dividerCount = (blocks: SlackBlock[]): number =>
+    blocks.filter((b) => (b as { type?: string }).type === 'divider').length;
+
+  it('separates sections with dividers (identity / fields+confidence / evidence-actions)', async () => {
+    const { blocks } = await makeCard();
+    // At least the two framing dividers (before fields, after confidence).
+    expect(dividerCount(blocks)).toBeGreaterThanOrEqual(2);
+  });
+
+  it('prints the confidence-glyph legend exactly ONCE per card', async () => {
+    const { blocks } = await makeCard();
+    const dump = jsonOf(blocks);
+    const legend = '✓ stated · ~ inferred · ? unknown';
+    expect(dump.split(legend).length - 1).toBe(1);
+  });
 });

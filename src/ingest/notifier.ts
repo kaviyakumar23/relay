@@ -45,8 +45,9 @@ export interface Notifier {
   /** Publish the App Home operations board for a user. `opts` threads the viewer's active
    * filter, the demo SLA multiplier, an as-of clock, and the N-000x label resolver (§F2). */
   publishHome(userId: string, needs: ProjectedNeed[], opts?: HomeViewOptions): Promise<void>;
-  /** Ephemeral notice to one user in a channel (e.g. "that button ships in triage"). */
-  postEphemeral(args: { channel: string; user: string; text: string }): Promise<void>;
+  /** Ephemeral notice to one user in a channel (e.g. "that button ships in triage"). Optional
+   * `blocks` render a framed message (e.g. the contact-reveal card); `text` is the fallback. */
+  postEphemeral(args: { channel: string; user: string; text: string; blocks?: SlackBlock[] }): Promise<void>;
   /** DM a user directly (Slack opens the IM by user id). Used for drift nudges. */
   postDirect(userId: string, text: string, blocks: SlackBlock[]): Promise<CardRef>;
   /** Post an arbitrary block message to #relay-dispatch (e.g. a reassignment card). */
@@ -67,7 +68,7 @@ export interface SlackClientLike {
       thread_ts?: string;
     }): Promise<{ ts?: string; channel?: string }>;
     update(args: { channel: string; ts: string; text: string; blocks?: unknown }): Promise<unknown>;
-    postEphemeral(args: { channel: string; user: string; text: string }): Promise<unknown>;
+    postEphemeral(args: { channel: string; user: string; text: string; blocks?: unknown }): Promise<unknown>;
   };
   views: {
     publish(args: { user_id: string; view: unknown }): Promise<unknown>;
@@ -116,7 +117,7 @@ export class SlackNotifier implements Notifier {
     await this.client.views.publish({ user_id: userId, view: appHomeView(needs, opts) });
   }
 
-  async postEphemeral(args: { channel: string; user: string; text: string }): Promise<void> {
+  async postEphemeral(args: { channel: string; user: string; text: string; blocks?: SlackBlock[] }): Promise<void> {
     await this.client.chat.postEphemeral(args);
   }
 
@@ -168,6 +169,8 @@ export interface RecordedEphemeral {
   channel: string;
   user: string;
   text: string;
+  /** The framed blocks when the ephemeral carries them (e.g. the contact-reveal card). */
+  blocks?: SlackBlock[];
 }
 
 /** A recorded direct message (drift nudge) — the DM's ref, target user, text + blocks. */
@@ -240,7 +243,7 @@ export class RecordingNotifier implements Notifier {
     this.homes.push({ userId, count: needs.length, opts });
   }
 
-  async postEphemeral(args: { channel: string; user: string; text: string }): Promise<void> {
+  async postEphemeral(args: { channel: string; user: string; text: string; blocks?: SlackBlock[] }): Promise<void> {
     this.ephemerals.push({ ...args });
   }
 

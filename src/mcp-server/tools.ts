@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { NeedState, NeedType, ProjectedNeed, Severity } from '../ledger/types';
 import { computeSitrepStats, type SitrepStats } from '../narrate/aggregate';
+import { scrubText } from '../narrate/redaction';
 import { verificationStatus } from '../surfaces/verification';
 
 // Pure, transport-agnostic implementations of Relay's read-only MCP tools (P1 — the MCP
@@ -13,6 +14,13 @@ import { verificationStatus } from '../surfaces/verification';
 // evidence *kinds*, and Slack permalinks only. We deliberately do NOT expose the assigned
 // volunteer's id (a person identifier) — get_need returns `is_assigned` instead. Handlers
 // are exported free of any transport so they are unit-testable by direct call.
+//
+// ONE EXCEPTION is defended in depth: `location_text` is the single FREE-TEXT field on a
+// projection — a coordinator can type anything into it (a landmark, a person's name, a phone
+// number). To keep the "PII-free by construction" claim honestly true even for that field,
+// every MCP tool runs location_text through the redaction scrubber (narrate/redaction.scrubText)
+// before returning it, so any leaked identifier comes back as a one-way [REDACTED:TYPE] token.
+// Filtering (search_needs.locality) still matches the RAW text — the scrub is output-only.
 
 // --- Domain enums (runtime lists, checked against the domain unions) ---------
 
@@ -133,12 +141,16 @@ interface CompactNeed {
   is_drifting: boolean;
 }
 
+/** location_text is free text — scrub it to a one-way [REDACTED:TYPE] token before it leaves
+ * the process, so this one non-derived field cannot break the PII-free guarantee. Null stays null. */
+const scrubLocation = (text: string | null): string | null => (text === null ? null : scrubText(text));
+
 const toCompact = (publicId: string, need: ProjectedNeed): CompactNeed => ({
   public_id: publicId,
   status: need.state,
   type: need.type,
   severity: need.severity,
-  location_text: need.location_text,
+  location_text: scrubLocation(need.location_text),
   people_count: need.people_count,
   is_drifting: need.flags.is_drifting,
 });
@@ -151,7 +163,7 @@ const toDetail = (publicId: string, need: ProjectedNeed): Record<string, unknown
     type: need.type,
     severity: need.severity,
     locality_id: need.locality_id,
-    location_text: need.location_text,
+    location_text: scrubLocation(need.location_text),
     people_count: need.people_count,
     languages: need.languages,
     is_assigned: need.assigned_volunteer_id !== null,

@@ -110,6 +110,33 @@ describe('projection — invariants', () => {
     expect(project(events).severity).toBe('critical');
   });
 
+  it('a later ExtractionCompleted (human Edit override) refines fields but does NOT rewind the lifecycle', () => {
+    const at = isoClock();
+    const events: NeedEvent[] = [
+      ev(NEED, at(), agent(), { type: 'NeedCreated', payload: { source: {} } }),
+      ev(NEED, at(), agent(), {
+        type: 'ExtractionCompleted',
+        payload: { need_type: 'water', severity: 'high', people_count: 2 },
+      }),
+      ev(NEED, at(), human(), { type: 'TriageConfirmed', payload: {} }),
+      ev(NEED, at(), human(), { type: 'Assigned', payload: { volunteer_id: 'V1' } }),
+      // The coordinator corrects the extracted fields on the CLAIMED card (a human override).
+      ev(NEED, at(), human(), {
+        type: 'ExtractionCompleted',
+        payload: { need_type: 'rescue', severity: 'low', people_count: 5, location_text: 'north jetty' },
+      }),
+    ];
+    const need = project(events);
+    // State is NOT rewound to TRIAGED — the correction keeps the current (CLAIMED) state.
+    expect(need.state).toBe('CLAIMED');
+    // The refined fields are applied…
+    expect(need.type).toBe('rescue');
+    expect(need.people_count).toBe(5);
+    expect(need.location_text).toBe('north jetty');
+    // …but the severity floor only ever raises: the 'low' correction cannot lower 'high'.
+    expect(need.severity).toBe('high');
+  });
+
   it('computes is_drifting as a flag (not a state) when past sla_due_at', () => {
     const at = isoClock();
     const claimAt = Date.parse('2026-07-04T00:00:03.000Z');

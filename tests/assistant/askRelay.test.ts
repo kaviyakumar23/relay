@@ -162,6 +162,46 @@ describe('askRelay — F8 assistant brain', () => {
     expect(res.answer).not.toContain('98400');
   });
 
+  const EMERGENCY_RESPONSE =
+    'Relay coordinates volunteer relief inside this workspace — it is not an emergency service. For a life-threatening emergency contact your local emergency number directly.';
+
+  it('an emergency-dispatch question returns the safety response — no ledger data, no citations', async () => {
+    const a = await seed();
+    // If askRelay reached this llm it would throw — the safety pre-check must short-circuit first.
+    const llm = new MockLlm(() => {
+      throw new Error('llm should not be called for an emergency-dispatch question');
+    });
+
+    for (const question of ['should I call 911?', 'dispatch an ambulance to Taramani', 'is this an emergency line?']) {
+      const res = await askRelay({ question, service: a.service, llm, now: NOW });
+      expect(res.intent).toBe('emergency');
+      expect(res.source).toBe('template');
+      expect(res.usedRts).toBe(false);
+      expect(res.citations).toHaveLength(0);
+      expect(res.answer).toBe(EMERGENCY_RESPONSE);
+    }
+  });
+
+  it('the safety pre-check holds with NO llm key (deterministic)', async () => {
+    const a = await seed();
+    const res = await askRelay({ question: 'call 108 for an ambulance', service: a.service, now: NOW });
+    expect(res.intent).toBe('emergency');
+    expect(res.answer).toBe(EMERGENCY_RESPONSE);
+    expect(res.citations).toHaveLength(0);
+  });
+
+  it('a normal ops question is unaffected by the emergency guard (no false trigger on a bare number)', async () => {
+    const a = await seed();
+    const res = await askRelay({
+      question: 'how many open needs affect over 100 people?',
+      service: a.service,
+      now: NOW,
+    });
+    expect(res.intent).not.toBe('emergency');
+    expect(res.answer).not.toBe(EMERGENCY_RESPONSE);
+    expect(assertNoPii(res.answer).ok).toBe(true);
+  });
+
   it('degrades to ledger-only (usedRts false) when RTS throws', async () => {
     const a = await seed();
     const rts = {

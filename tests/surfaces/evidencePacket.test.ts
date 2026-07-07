@@ -88,4 +88,35 @@ describe('buildEvidencePacket', () => {
     expect(text).toContain('F0FILEID'); // a Slack file reference is allowed
     expect(text).not.toContain('null');
   });
+
+  it('ticks present evidence ✓ and shows required-but-missing evidence as ○ pending', () => {
+    const blocks = buildEvidencePacket(needWith('critical', ['photo', 'locality_confirm']));
+    const lines = evidenceLines(blocks);
+    // photo + location ticked; recipient + sign-off still required → pending.
+    expect(lines.find((l) => l.includes('📷'))).toContain('✓');
+    expect(lines.find((l) => l.includes('📍'))).toContain('✓');
+    expect(lines.find((l) => l.includes('🙋'))).toContain('pending');
+    expect(lines.find((l) => l.includes('✅'))).toContain('pending');
+  });
+
+  it('renders the verification badge as a prominent section, not a small context line', () => {
+    const blocks = buildEvidencePacket(needWith('medium', ['recipient_confirm']));
+    const badge = blocks.find(
+      (b) =>
+        (b as { type?: string }).type === 'section' &&
+        ((b as { text?: { text?: string } }).text?.text ?? '').includes('Verification:'),
+    ) as { text?: { text?: string } } | undefined;
+    expect(badge).toBeDefined();
+    expect(badge?.text?.text).toContain('✅'); // met policy → an accomplishment badge
+  });
+
+  it('renders a fully-proven critical packet as four ✓ checklist ticks', () => {
+    const lines = evidenceLines(
+      buildEvidencePacket(
+        needWith('critical', ['photo', 'locality_confirm', 'recipient_confirm', 'coordinator_signoff']),
+      ),
+    );
+    expect(lines).toHaveLength(4);
+    expect(lines.every((l) => l.includes('✓'))).toBe(true);
+  });
 });

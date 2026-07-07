@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { App, Assistant } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import type { Scenario } from '../../demo/scenarios/schema';
-import { type AskRelayResult, askRelay } from '../assistant/askRelay';
+import { askRelay } from '../assistant/askRelay';
 import { RtsClient, type RtsResolver } from '../assistant/rts';
 import { createMockRts } from '../assistant/rtsMock';
 import { compressedClockNote, type InjectorPostMessage, runFloodInjector, SIMULATOR_IDENTITY } from '../demo/injector';
@@ -12,7 +12,7 @@ import { slaDueAtIso } from '../drift/sla';
 import { needEventKey } from '../ledger/idempotency';
 import type { NeedService } from '../ledger/needService';
 import type { EventStore } from '../ledger/store/eventStore';
-import type { ProjectedNeed } from '../ledger/types';
+import type { ConfidenceStatus, ProjectedNeed } from '../ledger/types';
 import type { AuditLog } from '../lib/auditLog';
 import { checkHealth, type HealthDeps } from '../lib/health';
 import { logger } from '../lib/logger';
@@ -25,8 +25,10 @@ import { generateReport, parseReportPeriod } from '../narrate/report';
 import { generateSitrep } from '../narrate/sitrep';
 import type { PipelineQueue } from '../pipeline/queue';
 import type { HomeViewOptions } from '../surfaces/appHome';
+import { buildAssistantAnswer } from '../surfaces/assistantAnswer';
 import { buildCanvasDocument, type CanvasWriteClient, writeCanvas } from '../surfaces/canvas';
 import { buildNudgeBlocks, DELAYED_ACTION, ENROUTE_ACTION, type NudgeAck, RELEASE_ACTION } from '../surfaces/driftCard';
+import { buildEditModal, EDIT_CALLBACK_ID, parseEditSubmission } from '../surfaces/editModal';
 import {
   buildDeliveryModal,
   buildRecipientConfirmPrompt,
@@ -55,21 +57,23 @@ import {
   type RankedCandidate,
   REASSIGN_PICK_ACTION,
 } from '../surfaces/matchCard';
-import { parseMergeTarget } from '../surfaces/needCard';
+import { NEED_EDIT_ACTION, NEED_ESCALATE_ACTION, parseMergeTarget } from '../surfaces/needCard';
 import {
   ACTIONS,
   context,
+  divider,
   escapeMrkdwn,
+  fields,
   parseActionId,
   type SlackBlock,
   type SlackView,
   section,
 } from '../surfaces/primitives';
-import { EVIDENCE_KIND_LABEL, verificationStatus } from '../surfaces/verification';
+import { canSignOff, EVIDENCE_KIND_LABEL } from '../surfaces/verification';
 import { buildVolunteerModal, parseVolunteerSubmission, VOLUNTEER_CALLBACK_ID } from '../surfaces/volunteerModal';
 import type { DedupeStore } from './dedupe';
 import { handleIntakeMessage } from './intakeHandler';
-import type { Notifier } from './notifier';
+import type { CardRef, Notifier } from './notifier';
 
 // The Bolt transport (ported from kept's slackApp.ts, dual-mode). It maps Slack
 // events/actions onto the intake pipeline; all real logic (dedupe, ledger gates,
@@ -276,24 +280,25 @@ function rosterText(list: Volunteer[]): string {
   return `*Volunteer roster* (${list.length})\n${lines.join('\n')}`;
 }
 
+/** The contact-reveal ephemeral (the privacy "wow"): a small framed block naming the number, who
+ * revealed it, and that the reveal was written to the append-only audit log. Shown ONLY to the
+ * clicking coordinator — this is the single surface Relay ever renders a beneficiary number on, and
+ * every reveal leaves an audit_log row. Pure over its inputs. */
+function revealEphemeralBlocks(publicId: string, contact: string, actorId: string, atIso: string): SlackBlock[] {
+  const when = `${atIso.slice(0, 19).replace('T', ' ')} UTC`;
+  return [
+    section(`🔒 *Beneficiary contact — ${escapeMrkdwn(publicId)}*\n${escapeMrkdwn(contact)}`),
+    context(`Revealed by <@${actorId}> · logged to audit_log at ${when} · shared only with you.`),
+    divider,
+    context('_Relay shows a contact on exactly one surface — this reveal — and records every one._'),
+  ];
+}
+
 /** Read a user's text off an assistant-thread message payload (ignore bot/system subtypes). */
 function readAssistantText(message: unknown): string {
   const m = message as { text?: unknown; subtype?: unknown };
   if (m.subtype !== undefined) return '';
   return typeof m.text === 'string' ? m.text.trim() : '';
-}
-
-/** Render an Ask-Relay result as a Slack message: the answer, its citations, and a grounding tag. */
-function buildAssistantAnswer(result: AskRelayResult): { text: string; blocks: SlackBlock[] } {
-  const blocks: SlackBlock[] = [section(result.answer)];
-  if (result.citations.length > 0) {
-    const links = result.citations
-      .map((c) => (c.permalink !== undefined ? `<${c.permalink}|${escapeMrkdwn(c.label)}>` : escapeMrkdwn(c.label)))
-      .join('  ·  ');
-    blocks.push(context(`Sources: ${links}`));
-  }
-  blocks.push(context(result.usedRts ? 'Grounded in the ledger + Real-Time Search' : 'Grounded in the ledger'));
-  return { text: result.answer, blocks };
 }
 
 /** A single normalized token for a synthetic simulator user id (per-persona intake attribution). */
@@ -400,6 +405,17 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     } catch (err) {
       logger.debug({ err }, 'error ephemeral failed');
     }
+  };
+
+  // Which posted message currently holds each need's dispatch card (channel + ts). A card is
+  // first posted by the pipeline worker; from then on every handler that touches a need's card
+  // records the ref it just acted on here, so a later interaction can update a need's card even
+  // when THIS click was on a different card — e.g. a Merge updates the ORIGINAL's card too, and
+  // an Edit view_submission (which carries no card ref of its own) can re-render in place. Purely
+  // in-memory view state (rebuilt on restart); a miss degrades gracefully.
+  const needCardRefs = new Map<string, CardRef>();
+  const rememberCard = (needId: string, ref: CardRef | null): void => {
+    if (ref !== null && needId !== '') needCardRefs.set(needId, ref);
   };
 
   // --- App Home operations board (F2) -----------------------------------------
@@ -519,6 +535,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
   // Score the roster for a (now-OPEN) need, emit MatchSuggested, and render the slate
   // under the card. Deterministic scorer; the LLM only phrases each rationale (grounded).
   const runMatch = async (needId: string, ref: ReturnType<typeof readCardRef>): Promise<void> => {
+    rememberCard(needId, ref);
     const need = await deps.service.getNeed(needId);
     if (need === null) return;
     const publicId = await resolvePublicId(needId);
@@ -625,18 +642,40 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       return;
     }
     const ref = readCardRef(body);
+    rememberCard(needId, ref);
+    const publicId = await resolvePublicId(needId);
+    const otherPublicId = await resolvePublicId(otherNeedId);
     const need = res.need ?? (await deps.service.getNeed(needId));
     if (ref !== null && need !== null) {
-      const publicId = await resolvePublicId(needId);
-      const otherPublicId = await resolvePublicId(otherNeedId);
       const events = await deps.service.getEvents(needId);
       await deps.notifier.updateCard(ref, { needId, publicId }, need, {
         events,
         publicIdOf: (id) => (id === otherNeedId ? otherPublicId : undefined),
       });
     }
-    // Only the clicked (duplicate) card's ref is known here; the original card refreshes
-    // on its next natural render. A needId→cardRef index is a documented integrator seam.
+    // Update the ORIGINAL's card too (needId here is the DUPLICATE; otherNeedId is the survivor):
+    // its dispatch card should now show the duplicate was linked in. Use the remembered card ref;
+    // if the original was never interacted with (unknown ref), degrade to a dispatch-channel note.
+    try {
+      const mergedNote = context(`🔗 *${escapeMrkdwn(publicId)} merged in* — a duplicate report was linked here.`);
+      const originalRef = needCardRefs.get(otherNeedId);
+      const original = await deps.service.getNeed(otherNeedId);
+      if (originalRef !== undefined && original !== null) {
+        const originalEvents = await deps.service.getEvents(otherNeedId);
+        await deps.notifier.updateCard(originalRef, { needId: otherNeedId, publicId: otherPublicId }, original, {
+          events: originalEvents,
+          extraBlocks: [mergedNote],
+        });
+      } else {
+        await deps.notifier.postToDispatch(`${otherPublicId} — duplicate ${publicId} merged in`, [
+          section(
+            `🔗 *${escapeMrkdwn(publicId)} merged into ${escapeMrkdwn(otherPublicId)}* — tracked as one need now.`,
+          ),
+        ]);
+      }
+    } catch (err) {
+      logger.debug({ err, need_id: otherNeedId }, 'merge: original-card update failed');
+    }
   });
 
   // Assign a picked volunteer (human) → CLAIMED, stamp the SLA clock, bump their load, and
@@ -670,6 +709,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     const vol = await deps.volunteerStore.getBySlackUser(volunteerId);
     const name = vol?.display_name ?? volunteerId;
     const ref = readCardRef(body);
+    rememberCard(needId, ref);
     const need = res.need ?? (await deps.service.getNeed(needId));
     if (ref !== null && need !== null) {
       const publicId = await resolvePublicId(needId);
@@ -705,16 +745,148 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       });
       return;
     }
+    const at = new Date().toISOString();
+    const publicId = await resolvePublicId(needId);
     await deps.notifier.postEphemeral({
       channel: ctx.channel,
       user: ctx.user,
-      text: `🔒 Beneficiary contact: ${contact}\nShared only with you and written to the audit log.`,
+      text: `🔒 Beneficiary contact for ${publicId}: ${contact} — shared only with you; written to the audit log.`,
+      blocks: revealEphemeralBlocks(publicId, contact, ctx.user, at),
     });
     try {
-      await deps.auditLog?.record({ actorId: ctx.user, action: 'contact_revealed', subject: needId });
+      await deps.auditLog?.record({ actorId: ctx.user, action: 'contact_revealed', subject: needId, meta: { at } });
     } catch (err) {
       logger.error({ err, need_id: needId }, 'audit log write failed for contact reveal');
     }
+  });
+
+  // --- Edit / Escalate handlers (§F2 secondary actions) -----------------------
+  // The committed card's "✏️ Edit" + "⏫ Escalate" controls. Edit corrects the extracted fields as
+  // a HUMAN override (a human-actor ExtractionCompleted the projection applies — severity floor only
+  // raises); Escalate records a PII-free ledger comment and raises the need's visibility in #relay-hq.
+
+  // "✏️ Edit" → open the field-correction modal (needs the interaction's trigger_id). The card ref is
+  // remembered here so the view_submission (which carries no card coordinates) can re-render in place.
+  app.action(new RegExp(`^${NEED_EDIT_ACTION}:`), async ({ ack, body, action, client }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const triggerId = (body as { trigger_id?: string }).trigger_id;
+    if (!needId || !triggerId) return;
+    rememberCard(needId, readCardRef(body));
+    const need = await deps.service.getNeed(needId);
+    if (need === null) return;
+    try {
+      const openArgs = {
+        trigger_id: triggerId,
+        view: buildEditModal(need),
+      } as unknown as Parameters<typeof client.views.open>[0];
+      await client.views.open(openArgs);
+    } catch (err) {
+      logger.error({ err, need_id: needId }, 'open edit modal failed');
+    }
+  });
+
+  // Field-correction submitted → a HUMAN-actor ExtractionCompleted override. The projection applies
+  // the corrected fields WITHOUT rewinding the lifecycle (state stays SAME from a committed need) and
+  // the severity floor still only-raises (invariant #4). Edited fields are marked 'stated' (a human
+  // stated them); the derived `contact` confidence is preserved so the reveal control survives.
+  app.view(EDIT_CALLBACK_ID, async ({ ack, view, body }) => {
+    await ack();
+    const needId = readViewMetadata(view);
+    const user = readViewUser(body);
+    if (needId === '' || user.id === '') return;
+    const need = await deps.service.getNeed(needId);
+    if (need === null) return;
+    const edit = parseEditSubmission(view as unknown as SlackView);
+    const confidence: Record<string, ConfidenceStatus> = { ...need.confidence, type: 'stated', severity: 'stated' };
+    if (edit.locality_id !== null || edit.location_text !== null) confidence.locality = 'stated';
+    if (edit.people_count !== null) confidence.people_count = 'stated';
+    try {
+      const res = await deps.service.dispatch(
+        needId,
+        {
+          type: 'ExtractionCompleted',
+          payload: {
+            need_type: edit.need_type,
+            severity: edit.severity,
+            locality_id: edit.locality_id,
+            location_text: edit.location_text,
+            people_count: edit.people_count,
+            confidence,
+          },
+        },
+        {
+          actor: { type: 'human', id: user.id },
+          at: new Date().toISOString(),
+          idempotencyKey: needEventKey(needId, 'ExtractionCompleted', `edit:${readViewId(view)}`),
+        },
+      );
+      if (res.status === 'rejected' || res.status === 'conflict') {
+        logger.warn({ need_id: needId, code: res.code ?? res.status }, 'edit override rejected');
+        return;
+      }
+      const ref = needCardRefs.get(needId);
+      const updated = res.need ?? (await deps.service.getNeed(needId));
+      if (ref !== undefined && updated !== null) {
+        const publicId = await resolvePublicId(needId);
+        const events = await deps.service.getEvents(needId);
+        await deps.notifier.updateCard(ref, { needId, publicId }, updated, {
+          events,
+          extraBlocks: [context(`✏️ *Fields corrected by <@${user.id}>* — human override recorded.`)],
+        });
+      }
+      void refreshHomes(); // a correction can move type/severity → the board's counters shift
+    } catch (err) {
+      logger.error({ err, need_id: needId }, 'edit submission failed');
+    }
+  });
+
+  // "⏫ Escalate" → a PII-free CommentAdded (human) + a compact repost to #relay-hq with an
+  // "escalated by" note. Minimal but real: a durable ledger event plus a real HQ signal, never a no-op.
+  app.action(new RegExp(`^${NEED_ESCALATE_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const { id: needId } = parseActionId(readActionId(action));
+    const ctx = readBodyContext(body);
+    if (!needId || !ctx.user) return;
+    rememberCard(needId, readCardRef(body));
+    const need = await deps.service.getNeed(needId);
+    if (need === null) return;
+    const res = await deps.service.dispatch(
+      needId,
+      { type: 'CommentAdded', payload: { ref: 'escalated' } },
+      {
+        actor: { type: 'human', id: ctx.user },
+        at: new Date().toISOString(),
+        idempotencyKey: needEventKey(needId, 'CommentAdded', `escalate:${interactionId(body, action)}`),
+      },
+    );
+    if (res.status === 'rejected' || res.status === 'conflict') {
+      await notifyError(ctx, `Couldn't escalate that need (${res.code ?? res.status}).`);
+      return;
+    }
+    const publicId = await resolvePublicId(needId);
+    const hq = deps.roles.hqChannelId || deps.roles.dispatchChannelId;
+    if (hq !== '') {
+      const location = need.location_text ? escapeMrkdwn(need.location_text) : '_unknown_';
+      const people = need.people_count !== null ? String(need.people_count) : '_unknown_';
+      try {
+        await deps.notifier.postToChannel(hq, `${publicId} escalated`, [
+          section(`⚠️ *${escapeMrkdwn(publicId)} escalated by <@${ctx.user}>* — needs coordinator attention.`),
+          fields([
+            `*Type:*\n${escapeMrkdwn(need.type)}`,
+            `*Severity:*\n${escapeMrkdwn(need.severity)}`,
+            `*Location:*\n${location}`,
+            `*People:*\n${people}`,
+            `*Status:*\n${need.state}`,
+          ]),
+          context('Escalated from the dispatch card · recorded on the ledger (CommentAdded).'),
+        ]);
+      } catch (err) {
+        logger.error({ err, need_id: needId }, 'escalate: HQ post failed');
+      }
+    }
+    const where = hq !== '' ? ` to <#${hq}>` : '';
+    await notifyError(ctx, `⏫ ${publicId} escalated${where} and logged to the ledger.`);
   });
 
   // --- Drift handlers (Jul 8) -------------------------------------------------
@@ -861,6 +1033,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     const vol = await deps.volunteerStore.getBySlackUser(volunteerId);
     const name = vol?.display_name ?? volunteerId;
     const ref = readCardRef(body);
+    rememberCard(needId, ref);
     const updated = res.need ?? (await deps.service.getNeed(needId));
     if (ref !== null && updated !== null) {
       const publicId = await resolvePublicId(needId);
@@ -886,6 +1059,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
   const renderEvidenceCard = async (needId: string, body: unknown, prefetched?: ProjectedNeed): Promise<void> => {
     const ref = readCardRef(body);
     if (ref === null) return;
+    rememberCard(needId, ref);
     const need = prefetched ?? (await deps.service.getNeed(needId));
     if (need === null) return;
     const publicId = await resolvePublicId(needId);
@@ -1035,7 +1209,25 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     const { id: needId } = parseActionId(readActionId(action));
     const ctx = readBodyContext(body);
     if (!needId || !ctx.user) return;
+    const need = await deps.service.getNeed(needId);
+    if (need === null) return;
+    rememberCard(needId, readCardRef(body));
+    // Guard FIRST (fixes the locked-button bug): a click into an incomplete packet must record
+    // NOTHING. Slack has no truly-disabled button, so the handler — not the render — is the gate:
+    // if everything the severity policy needs BEFORE the sign-off isn't attached, ack + an
+    // ephemeral naming the missing kinds, and do not dispatch coordinator_signoff / CoordinatorSignedOff.
+    const gate = canSignOff(need);
+    if (!gate.allowed) {
+      const missing = gate.missing.map((k) => EVIDENCE_KIND_LABEL[k]).join(', ');
+      await notifyError(
+        ctx,
+        `Can't close yet — missing: ${missing || 'more evidence'}. Attach the full packet before signing off.`,
+      );
+      await renderEvidenceCard(needId, body, need);
+      return;
+    }
     const disc = interactionId(body, action);
+    // Prerequisites present → attach L3 sign-off + CoordinatorSignedOff (human), then Verified → Closed.
     await deps.service.dispatch(
       needId,
       { type: 'EvidenceAttached', payload: { kind: 'coordinator_signoff', meta: { via: 'signoff' } } },
@@ -1056,18 +1248,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     );
     if (signed.status === 'rejected' || signed.status === 'conflict') {
       await notifyError(ctx, `Couldn't sign off (${signed.code ?? signed.status}).`);
-      return;
-    }
-    const need = signed.need ?? (await deps.service.getNeed(needId));
-    if (need === null) return;
-    const vstatus = verificationStatus(need);
-    if (!vstatus.meetsPolicy) {
-      const missing = vstatus.missing.map((k) => EVIDENCE_KIND_LABEL[k]).join(', ');
-      await notifyError(
-        ctx,
-        `Can't close yet — missing: ${missing || 'more evidence'}. The packet must be complete to verify.`,
-      );
-      await renderEvidenceCard(needId, body, need);
+      await renderEvidenceCard(needId, body);
       return;
     }
     const verified = await deps.service.dispatch(
@@ -1323,7 +1504,15 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
           rts: assistantRts,
           now: Date.now(),
         });
-        await say(buildAssistantAnswer(result) as unknown as Parameters<typeof say>[0]);
+        // A refusal (out-of-scope OR the emergency-dispatch safety line) renders the answer alone —
+        // no citations. In-scope answers get the structured source list from buildAssistantAnswer.
+        const refusal = result.intent === 'out-of-scope' || result.intent === 'emergency';
+        const blocks = buildAssistantAnswer({
+          answer: result.answer,
+          citations: result.citations,
+          outOfScope: refusal,
+        });
+        await say({ text: result.answer, blocks } as unknown as Parameters<typeof say>[0]);
       } catch (err) {
         logger.error({ err }, 'assistant: askRelay failed');
         await say('I hit an error reading the ledger — try again in a moment.');

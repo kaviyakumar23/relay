@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { EvidenceKind, ProjectedNeed, Severity } from '../../src/ledger/types';
 import { emptyFlags } from '../../src/ledger/types';
-import { verificationStatus } from '../../src/surfaces/verification';
+import { canSignOff, verificationStatus } from '../../src/surfaces/verification';
 
 // verificationStatus mirrors the engine's close policy (BUILD-DOC §F5 / §6.2 rule 3):
 // L1 = photo + locality_confirm · L2 = recipient_confirm · L3 = coordinator_signoff.
@@ -88,5 +88,39 @@ describe('verificationStatus — critical/high (policy L3)', () => {
     expect(v.haveL1).toBe(true);
     expect(v.meetsPolicy).toBe(false);
     expect(v.missing).toEqual(['recipient_confirm', 'coordinator_signoff']);
+  });
+});
+
+describe('canSignOff — the sign-off precheck (everything EXCEPT the sign-off itself)', () => {
+  it('critical: allowed once photo + location + recipient are present (sign-off is the only gap)', () => {
+    const c = canSignOff(needWith('critical', ['photo', 'locality_confirm', 'recipient_confirm']));
+    expect(c.allowed).toBe(true);
+    expect(c.missing).toEqual([]);
+  });
+
+  it('critical: a lone photo cannot sign off — location + recipient still missing (canonical order)', () => {
+    const c = canSignOff(needWith('critical', ['photo']));
+    expect(c.allowed).toBe(false);
+    expect(c.missing).toEqual(['locality_confirm', 'recipient_confirm']);
+  });
+
+  it('critical: no evidence lists all three prerequisites, never the sign-off itself', () => {
+    const c = canSignOff(needWith('high', []));
+    expect(c.allowed).toBe(false);
+    expect(c.missing).toEqual(['photo', 'locality_confirm', 'recipient_confirm']);
+    expect(c.missing).not.toContain('coordinator_signoff');
+  });
+
+  it('critical: a full packet (incl. an existing sign-off) still reports allowed with nothing missing', () => {
+    const c = canSignOff(
+      needWith('critical', ['photo', 'locality_confirm', 'recipient_confirm', 'coordinator_signoff']),
+    );
+    expect(c.allowed).toBe(true);
+    expect(c.missing).toEqual([]);
+  });
+
+  it('medium/low: recipient confirmation is the only prerequisite (no sign-off required by policy)', () => {
+    expect(canSignOff(needWith('medium', ['recipient_confirm']))).toEqual({ allowed: true, missing: [] });
+    expect(canSignOff(needWith('low', []))).toEqual({ allowed: false, missing: ['recipient_confirm'] });
   });
 });

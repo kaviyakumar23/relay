@@ -48,6 +48,34 @@ describe('decide — illegal transitions', () => {
   });
 });
 
+describe('decide — ExtractionCompleted human field-correction override', () => {
+  /** NeedCreated → Extraction → Triage → Assigned (human): a CLAIMED need. */
+  function claimedLog(): NeedEvent[] {
+    const at = isoClock();
+    return [
+      ev(NEED, at(), agent(), { type: 'NeedCreated', payload: { source: {} } }, 'k-create'),
+      ev(
+        NEED,
+        at(),
+        agent(),
+        { type: 'ExtractionCompleted', payload: { need_type: 'medical', severity: 'critical' } },
+        'k-extract',
+      ),
+      ev(NEED, at(), human(), { type: 'TriageConfirmed', payload: {} }, 'k-triage'),
+      ev(NEED, at(), human(), { type: 'Assigned', payload: { volunteer_id: 'V1' } }, 'k-assign'),
+    ];
+  }
+
+  it('admits a human ExtractionCompleted from a committed (CLAIMED) need — the card Edit override', () => {
+    const d = decide(
+      claimedLog(),
+      { type: 'ExtractionCompleted', payload: { need_type: 'rescue', severity: 'high', people_count: 4 } },
+      ctx({ actor: human() }),
+    );
+    expect(d.outcome).toBe('emit');
+  });
+});
+
 describe('decide — human gates (§6.2)', () => {
   it('rejects Assigned proposed by an agent actor', () => {
     const d = decide(openLog(), { type: 'Assigned', payload: { volunteer_id: 'V1' } }, ctx({ actor: agent() }));

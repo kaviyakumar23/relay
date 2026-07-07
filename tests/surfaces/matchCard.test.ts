@@ -97,4 +97,15 @@ describe('buildMatchBlocks', () => {
     expect(dump).toContain('No available volunteers');
     expect(dump).not.toContain(ASSIGN_PICK_ACTION);
   });
+
+  it('separates candidates with dividers so the slate is not a stacked wall', () => {
+    const blocks = buildMatchBlocks(NEED, [
+      ranked('U1', 'First', 0.9, 'r1'),
+      ranked('U2', 'Second', 0.7, 'r2'),
+      ranked('U3', 'Third', 0.5, 'r3'),
+    ]);
+    const dividers = blocks.filter((b) => (b as { type?: string }).type === 'divider').length;
+    // One divider under the header context, then one between each of the 3 candidates.
+    expect(dividers).toBe(3);
+  });
 });

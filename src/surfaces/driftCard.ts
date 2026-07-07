@@ -1,6 +1,6 @@
 import type { ProjectedNeed } from '../ledger/types';
 import { buildMatchBlocks, type MatchNeed, type RankedCandidate, REASSIGN_PICK_ACTION } from './matchCard';
-import { actions, button, context, escapeMrkdwn, type SlackBlock, section } from './primitives';
+import { actions, button, context, divider, escapeMrkdwn, header, type SlackBlock, section } from './primitives';
 
 // Drift surfaces (BUILD-DOC §F4). Two Block Kit builders, both pure over the projection:
 //  - buildNudgeBlocks     — the DM Relay sends the assigned volunteer when their delivery
@@ -64,16 +64,39 @@ export function buildNudgeBlocks(
 }
 
 /**
+ * The narration for the reassignment card — the demo's hero moment (BUILD-DOC §F4, hero rule).
+ * A silent delivery failure must NOT read as a neutral routing task: the card has to tell the
+ * story a judge should retell — Relay noticed a stuck volunteer before the delivery was missed.
+ * Calm and factual, never alarmist. Three cases: past SLA (drifting), approaching (at risk),
+ * or handed back (released).
+ */
+function reassignNarration(need: ProjectedNeed, publicId: string): { header: string; line: string } {
+  if (need.flags.is_drifting) {
+    return {
+      header: '⚠️ Delivery drifting — volunteer stuck',
+      line: `*${publicId}* is past its SLA and the assigned volunteer hasn't moved. Relay caught it — reassign before it's missed.`,
+    };
+  }
+  if (need.flags.is_at_risk) {
+    return {
+      header: '⏳ Delivery at risk — SLA approaching',
+      line: `*${publicId}* is approaching its SLA with no progress yet. Relay flagged it early — hand it to a fresh volunteer to keep it on time.`,
+    };
+  }
+  return {
+    header: '↩️ Released — needs a new volunteer',
+    line: `*${publicId}* was handed back and is waiting. Relay kept the obligation alive — reassign it so no one is left waiting.`,
+  };
+}
+
+/**
  * The reassignment card posted to #relay-dispatch when a delivery drifts or is released.
- * A drift flare states why, then a FRESH top-3 slate (already scored + excluding the
- * current volunteer) whose Assign buttons carry REASSIGN_PICK_ACTION.
+ * The hero narration (a titled header + a one-line story) states what Relay caught, then a
+ * FRESH top-3 slate (already scored + excluding the current volunteer) whose Assign buttons
+ * carry REASSIGN_PICK_ACTION for a one-click hand-off.
  */
 export function buildReassignBlocks(need: ProjectedNeed, publicId: string, ranked: RankedCandidate[]): SlackBlock[] {
-  const flare = need.flags.is_drifting
-    ? '⚠️ *DRIFTING* — past its SLA'
-    : need.flags.is_at_risk
-      ? '⏳ *At risk* — approaching its SLA'
-      : '↩️ *Released* — needs a new volunteer';
+  const narration = reassignNarration(need, publicId);
   const matchNeed: MatchNeed = {
     needId: need.need_id,
     publicId,
@@ -81,8 +104,10 @@ export function buildReassignBlocks(need: ProjectedNeed, publicId: string, ranke
     localityText: need.location_text,
   };
   return [
-    section(`🔄 *${publicId} needs reassignment* — ${flare}`),
+    header(narration.header),
+    section(narration.line),
     context(`${whatLabel(need)} · one-click hand-off to a fresh volunteer below.`),
+    divider,
     ...buildMatchBlocks(matchNeed, ranked, { assignAction: REASSIGN_PICK_ACTION }),
   ];
 }

@@ -1,6 +1,6 @@
 import type { NeedType } from '../ledger/types';
 import type { ScoredCandidate } from '../match/scorer';
-import { actions, button, context, escapeMrkdwn, header, type SlackBlock, section } from './primitives';
+import { actions, button, context, divider, escapeMrkdwn, header, type SlackBlock, section } from './primitives';
 
 // The match card (BUILD-DOC §F2/§F3). After a human confirms triage, the scorer ranks
 // volunteers and this renders the top few as Block Kit — each with a proportional score
@@ -53,14 +53,22 @@ export function scoreBar(score: number): string {
   return `${'▓'.repeat(filled)}${'░'.repeat(BAR_CELLS - filled)}`;
 }
 
-function candidateBlocks(need: MatchNeed, c: RankedCandidate, assignAction: string): SlackBlock[] {
+/**
+ * One candidate: a name + score header line, a readable unicode score bar over the one-line
+ * rationale, then a clear Assign button. `index` drives a divider between candidates (not before
+ * the first) so the slate reads as distinct rows rather than a stacked wall.
+ */
+function candidateBlocks(need: MatchNeed, c: RankedCandidate, assignAction: string, index: number): SlackBlock[] {
   const pct = Math.round(Math.min(1, Math.max(0, c.score)) * 100);
   const name = escapeMrkdwn(c.volunteer.display_name);
   const line = escapeMrkdwn(c.rationale);
-  return [
-    section(`*${name}*  \`${scoreBar(c.score)}\` ${pct}%\n${line}`),
+  const blocks: SlackBlock[] = [];
+  if (index > 0) blocks.push(divider);
+  blocks.push(
+    section(`*${name}* — ${pct}% match\n\`${scoreBar(c.score)}\`  ${line}`),
     actions([button('Assign', assignAction, encodeAssignTarget(need.needId, c.volunteer.slack_user_id), 'primary')]),
-  ];
+  );
+  return blocks;
 }
 
 /** Render options for buildMatchBlocks. */
@@ -91,7 +99,8 @@ export function buildMatchBlocks(
     blocks.push(section('_No available volunteers matched this need. Widen radius or check the roster._'));
     return blocks;
   }
-  for (const c of ranked) blocks.push(...candidateBlocks(need, c, assignAction));
+  blocks.push(divider);
+  for (const [index, c] of ranked.entries()) blocks.push(...candidateBlocks(need, c, assignAction, index));
   blocks.push(context('_Assign is a human decision — clicking it commits the volunteer and starts the SLA clock._'));
   return blocks;
 }

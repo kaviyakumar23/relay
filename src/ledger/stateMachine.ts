@@ -7,7 +7,7 @@ import { ACTIVE_STATES, type NeedState, type ProjectedNeed, type Severity } from
 // canApply decides. No transition happens without passing here.
 
 export type TransitionTarget = NeedState | 'SAME';
-type TargetResolver = (event: NeedEvent) => TransitionTarget;
+type TargetResolver = (event: NeedEvent, currentState: NeedState) => TransitionTarget;
 
 export interface TransitionSpec {
   /** Legal source states, or a class: CREATE (from nothing), ANY_ACTIVE, ANY (incl. terminal). */
@@ -20,9 +20,32 @@ export interface TransitionSpec {
 
 const T = (s: TransitionSpec): TransitionSpec => s;
 
-/** ExtractionCompleted routes to NEEDS_REVIEW (human) when it can't be trusted. */
-const extractionTarget: TargetResolver = (event) =>
-  isEvent(event, 'ExtractionCompleted') && event.payload.needs_review === true ? 'NEEDS_REVIEW' : 'TRIAGED';
+/**
+ * The FIRST extraction (from NEW) advances the lifecycle to TRIAGED, or NEEDS_REVIEW when it can't
+ * be trusted. A LATER ExtractionCompleted is a human field-correction ("✏️ Edit" on the card) — it
+ * refines the derived fields but must NOT rewind the lifecycle, so from any non-NEW state it keeps
+ * the current state (SAME). The projection still applies the corrected fields (severity floor only
+ * ever raises, invariant #4).
+ */
+const extractionTarget: TargetResolver = (event, current) => {
+  if (current !== 'NEW') return 'SAME';
+  return isEvent(event, 'ExtractionCompleted') && event.payload.needs_review === true ? 'NEEDS_REVIEW' : 'TRIAGED';
+};
+
+/** States a field-correction (human override) ExtractionCompleted may apply from: the first pass
+ * fires from NEW; a coordinator correction is admitted through the in-flight (pre-close) states the
+ * card's Edit control is offered from. Terminal / closed / duplicate states never accept one. */
+const EXTRACTION_FROM: readonly NeedState[] = [
+  'NEW',
+  'TRIAGED',
+  'OPEN',
+  'NEEDS_REVIEW',
+  'MATCH_SUGGESTED',
+  'REOPENED',
+  'CLAIMED',
+  'IN_PROGRESS',
+  'DELIVERED_UNVERIFIED',
+];
 
 const PRE_ASSIGN: readonly NeedState[] = ['NEW', 'TRIAGED', 'OPEN', 'NEEDS_REVIEW', 'MATCH_SUGGESTED'];
 const ASSIGNABLE: readonly NeedState[] = ['OPEN', 'MATCH_SUGGESTED', 'REOPENED'];
@@ -30,7 +53,7 @@ const CLAIMED_WORK: readonly NeedState[] = ['CLAIMED', 'IN_PROGRESS'];
 
 export const TRANSITIONS: Record<EventType, TransitionSpec> = {
   NeedCreated: T({ from: 'CREATE', to: 'NEW', humanGate: false }),
-  ExtractionCompleted: T({ from: ['NEW'], to: extractionTarget, humanGate: false }),
+  ExtractionCompleted: T({ from: EXTRACTION_FROM, to: extractionTarget, humanGate: false }),
   DuplicateProposed: T({ from: PRE_ASSIGN, to: 'SAME', humanGate: false }),
   DuplicateConfirmed: T({ from: PRE_ASSIGN, to: 'DUPLICATE', humanGate: true }),
   TriageConfirmed: T({ from: ['TRIAGED', 'NEEDS_REVIEW'], to: 'OPEN', humanGate: true }),
@@ -63,7 +86,7 @@ export const HUMAN_GATES: ReadonlySet<EventType> = new Set(
 
 /** Resolve the target state a transition moves to, given the current state. */
 export function resolveTarget(spec: TransitionSpec, event: NeedEvent, currentState: NeedState): NeedState {
-  const raw = typeof spec.to === 'function' ? spec.to(event) : spec.to;
+  const raw = typeof spec.to === 'function' ? spec.to(event, currentState) : spec.to;
   return raw === 'SAME' ? currentState : raw;
 }
 

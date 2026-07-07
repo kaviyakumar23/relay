@@ -265,3 +265,73 @@ describe('MCP tools — get_sitrep', () => {
     expect(stats.totalActive).toBe(0); // the injected fn won, not the default
   });
 });
+
+/** Seed a single OPEN need whose free-text location carries a name + phone, returning the read port. */
+async function seedNeedWithLocation(locationText: string): Promise<NeedReadPort> {
+  const store = new InMemoryEventStore();
+  const svc = new NeedService(store, () => NOW);
+  const at = isoClock(NOW - 3_600_000);
+  const created = await svc.createNeed({
+    source: { permalink: 'https://relay.demo/loc' },
+    actor: system('intake'),
+    at: at(),
+    idempotencyKey: 'loc-1',
+  });
+  if (created.status !== 'created') throw new Error('seed create failed');
+  const id = created.needId;
+  const ext = await svc.dispatch(
+    id,
+    {
+      type: 'ExtractionCompleted',
+      payload: { need_type: 'rescue', severity: 'critical', location_text: locationText },
+    },
+    { actor: agent(), at: at(), idempotencyKey: 'loc-extract' },
+  );
+  if (ext.status !== 'applied') throw new Error('seed extract failed');
+  await svc.dispatch(
+    id,
+    { type: 'TriageConfirmed', payload: {} },
+    { actor: human(), at: at(), idempotencyKey: 'loc-triage' },
+  );
+  return {
+    listNeeds: (now) => svc.listNeeds(now),
+    getPublicId: (needId) => store.getPublicId(needId),
+  };
+}
+
+describe('MCP tools — location_text is scrubbed (PII-free by construction, defended)', () => {
+  // A coordinator can type anything into the free-text location; the tools must not leak a name
+  // or phone through it. Both search_needs and get_need run it through the redaction scrubber.
+  const DIRTY = 'Ramesh Kumar house, call 98400 12345, near Velachery';
+
+  it('search_needs redacts a phone/name in location_text', async () => {
+    const service = await seedNeedWithLocation(DIRTY);
+    const tools = createRelayTools({ service, now: () => NOW });
+    const body = payload(await tools.search_needs({})) as { needs: Array<{ location_text: string | null }> };
+    const loc = body.needs[0]?.location_text ?? '';
+    expect(loc).not.toContain('98400');
+    expect(loc).not.toContain('12345');
+    expect(loc).not.toContain('Ramesh');
+    expect(loc).toContain('[REDACTED:PHONE]');
+    expect(loc).toContain('[REDACTED:NAME]');
+    expect(loc).toContain('Velachery'); // the gazetteer locality survives — it is not PII
+  });
+
+  it('get_need redacts a phone/name in location_text', async () => {
+    const service = await seedNeedWithLocation(DIRTY);
+    const tools = createRelayTools({ service, now: () => NOW });
+    const detail = payload(await tools.get_need({ public_id: 'N-0001' })) as { location_text: string | null };
+    const loc = detail.location_text ?? '';
+    expect(loc).not.toContain('98400');
+    expect(loc).not.toContain('Ramesh');
+    expect(loc).toContain('[REDACTED:PHONE]');
+  });
+
+  it('the locality filter still matches the RAW text (scrub is output-only)', async () => {
+    const service = await seedNeedWithLocation(DIRTY);
+    const tools = createRelayTools({ service, now: () => NOW });
+    // "Velachery" is in the raw text; the filter finds it even though output is scrubbed.
+    const body = payload(await tools.search_needs({ locality: 'velachery' })) as { count: number };
+    expect(body.count).toBe(1);
+  });
+});

@@ -90,3 +90,30 @@ export function verificationStatus(need: ProjectedNeed): VerificationStatus {
     requiredLabel,
   };
 }
+
+/** Result of the sign-off precheck: whether a coordinator sign-off may be recorded now, and if
+ * not, which prerequisite evidence kinds are still missing (canonical order). */
+export interface SignOffCheck {
+  allowed: boolean;
+  missing: EvidenceKind[];
+}
+
+/**
+ * Pure precheck for the "Sign off & close" action: is EVERYTHING the severity policy requires
+ * EXCEPT the coordinator sign-off itself already attached? Sign-off is the last step in the L3
+ * packet, so it may only be recorded once photo + location + recipient are present (critical|high);
+ * for medium|low the policy is met at L2 (recipient confirmation) with no sign-off required, so
+ * the recipient confirmation is the only prerequisite.
+ *
+ * The integrator MUST call this before dispatching EvidenceAttached(coordinator_signoff) /
+ * CoordinatorSignedOff, and no-op with a "missing: X" hint when `allowed` is false — otherwise a
+ * prematurely-clicked (visually locked) button still records the event. Pure — no store, no Slack.
+ */
+export function canSignOff(need: ProjectedNeed): SignOffCheck {
+  const kinds = new Set(need.evidence.map((e) => e.kind));
+  const required = isHighSeverity(need.severity) ? REQUIRED_HIGH : REQUIRED_LOW;
+  // Everything the policy needs EXCEPT the sign-off itself must already be attached.
+  const prerequisites = new Set<EvidenceKind>(required.filter((k) => k !== 'coordinator_signoff'));
+  const missing = KIND_ORDER.filter((k) => prerequisites.has(k) && !kinds.has(k));
+  return { allowed: missing.length === 0, missing };
+}

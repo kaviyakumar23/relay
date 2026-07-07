@@ -7,6 +7,7 @@ import {
   actions,
   button,
   context,
+  divider,
   escapeMrkdwn,
   fields,
   header,
@@ -43,6 +44,16 @@ const CONFIDENCE_GLYPH: Record<ConfidenceStatus, string> = {
 
 /** action_id for the reveal-with-audit button (wired in src/ingest/slackApp.ts). */
 const REVEAL_ACTION = 'need_reveal';
+
+/** Committed-card secondary actions (BUILD-DOC §F2: Confirm·Assign·Merge·Edit·Escalate).
+ *  Edit opens a correction modal; Escalate raises severity for a stuck obligation. Both are
+ *  human-gated transitions — the ids are wired here; the integrator registers the handlers. */
+export const NEED_EDIT_ACTION = 'need_edit';
+export const NEED_ESCALATE_ACTION = 'need_escalate';
+
+/** Committed states past which Edit/Escalate no longer apply — the loop is closed (VERIFIED,
+ *  CLOSED) or the need is dead (EXPIRED, CANCELLED). No secondary action row is rendered. */
+const NO_SECONDARY_ACTION_STATES: ReadonlySet<string> = new Set(['VERIFIED', 'CLOSED', 'EXPIRED', 'CANCELLED']);
 
 /** States in which Confirm/Assign are still offered (pre-commit). Past this, the
  * card shows a status line instead of the action row. */
@@ -178,8 +189,12 @@ function fieldsBlock(need: ProjectedNeed): SlackBlock {
   ]);
 }
 
-/** Per-field confidence chips, or the pre-extraction pending note when empty. */
-function confidenceBlock(need: ProjectedNeed): SlackBlock {
+/**
+ * The confidence section: a single chip row, then the glyph legend ONCE per card as one
+ * compact context line (the review flagged the legend being reprinted per field). Pre-extraction
+ * needs render the pending note instead. Returns blocks so the legend stays a separate, quiet line.
+ */
+function confidenceBlocks(need: ProjectedNeed): SlackBlock[] {
   const chip = (label: string, key: string): string | null => {
     const status = need.confidence[key];
     return status === undefined ? null : `${label} ${CONFIDENCE_GLYPH[status]}`;
@@ -192,11 +207,11 @@ function confidenceBlock(need: ProjectedNeed): SlackBlock {
   ].filter((c): c is string => c !== null);
 
   if (parts.length === 0) {
-    return context(
-      'Confidence: `extraction pending` — Relay will classify type, severity, location & headcount shortly.',
-    );
+    return [
+      context('Confidence: `extraction pending` — Relay will classify type, severity, location & headcount shortly.'),
+    ];
   }
-  return context(`Confidence: ${parts.join('  ·  ')}   ( ✓ stated · ~ inferred · ? unknown )`);
+  return [context(`Confidence:  ${parts.join('  ·  ')}`), context('_✓ stated · ~ inferred · ? unknown_')];
 }
 
 /** Banner block(s) for each auto-detected duplicate (DuplicateProposed) that has not
@@ -244,12 +259,17 @@ export function dispatchCard(publicId: string, need: ProjectedNeed, opts: Dispat
   const hasContact = need.confidence.contact === 'stated';
   const committed = !PRE_COMMIT_STATES.has(need.state);
 
+  // Visual hierarchy (§F2 review): identity (header + received/status) → dividers frame the
+  // derived fields + confidence → the evidence/action section. Divider rules keep the card from
+  // reading as one gray wall of stacked context lines.
   const blocks: SlackBlock[] = [
     header(headerText(publicId, need)),
     context(`Received ${receivedLabel(need.created_at)}  ·  Status: *${need.state}*`),
     ...duplicateBanners(need, opts),
+    divider,
     fieldsBlock(need),
-    confidenceBlock(need),
+    ...confidenceBlocks(need),
+    divider,
   ];
 
   if (committed) {
@@ -263,7 +283,17 @@ export function dispatchCard(publicId: string, need: ProjectedNeed, opts: Dispat
       blocks.push(...obligationStatusBlocks(need));
     }
     const revealHidden = need.state === 'VERIFIED' || need.state === 'CLOSED';
-    if (hasContact && !revealHidden) blocks.push(actions([button('🔒 Reveal contact', REVEAL_ACTION, need.need_id)]));
+    // Secondary action row (§F2): Edit + Escalate on an in-flight committed need, plus the
+    // locked reveal control. Suppressed once the loop is closed / the need is dead.
+    const actionRow: SlackBlock[] = [];
+    if (!NO_SECONDARY_ACTION_STATES.has(need.state)) {
+      actionRow.push(
+        button('✏️ Edit', NEED_EDIT_ACTION, need.need_id),
+        button('⏫ Escalate', NEED_ESCALATE_ACTION, need.need_id, 'danger'),
+      );
+    }
+    if (hasContact && !revealHidden) actionRow.push(button('🔒 Reveal contact', REVEAL_ACTION, need.need_id));
+    if (actionRow.length > 0) blocks.push(actions(actionRow));
   } else {
     const actionRow: SlackBlock[] = [
       button('Confirm', ACTIONS.confirm, need.need_id, 'primary'),

@@ -93,11 +93,18 @@ describe('buildNudgeBlocks', () => {
 });
 
 describe('buildReassignBlocks', () => {
-  it('flares the drift and wires a fresh slate to the reassign action', () => {
+  it('carries the hero narration (stuck volunteer, caught before missed) and wires a fresh slate', () => {
     const blocks = buildReassignBlocks(need({ flags: { is_drifting: true } }), 'N-0001', [ranked('SEED_U12', 'Kavya')]);
     const dump = jsonOf(blocks);
+    // The hero moment must read as a caught silent-failure, not a neutral routing task.
+    const head = blocks[0] as { type: string; text?: { text?: string } };
+    expect(head.type).toBe('header');
+    expect(head.text?.text).toContain('Delivery drifting');
+    expect(head.text?.text).toContain('volunteer stuck');
     expect(dump).toContain('N-0001');
-    expect(dump).toContain('DRIFTING');
+    expect(dump).toContain('past its SLA');
+    expect(dump).toContain("hasn't moved");
+    expect(dump).toContain('Relay caught it');
     expect(dump).toContain('Kavya');
     const reassign = actionIds(blocks)
       .map(parseActionId)
@@ -106,10 +113,19 @@ describe('buildReassignBlocks', () => {
     expect(reassign[0]?.id).toBe('need-1|SEED_U12');
   });
 
-  it('reads a released flare when the need is no longer at risk', () => {
+  it('narrates the at-risk case as caught early, before the SLA is missed', () => {
+    const blocks = buildReassignBlocks(need({ flags: { is_at_risk: true } }), 'N-0003', [ranked('SEED_U12', 'Kavya')]);
+    const head = blocks[0] as { text?: { text?: string } };
+    expect(head.text?.text).toContain('at risk');
+    expect(jsonOf(blocks)).toContain('Relay flagged it early');
+  });
+
+  it('reads a released narration when the need was handed back', () => {
     const blocks = buildReassignBlocks(need({ state: 'OPEN', assigned_volunteer_id: null }), 'N-0002', [
       ranked('SEED_U12', 'Kavya'),
     ]);
-    expect(jsonOf(blocks)).toContain('Released');
+    const dump = jsonOf(blocks);
+    expect(dump).toContain('Released');
+    expect(dump).toContain('handed back');
   });
 });
