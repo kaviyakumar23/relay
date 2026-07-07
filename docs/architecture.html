@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Relay — Architecture</title>
+<style>
+  :root {
+    --paper: #FBFAF7;
+    --panel: #FFFFFF;
+    --ink: #16202B;
+    --slate: #5C6B78;
+    --hair: #DFE3E1;
+    --band: #F1F2EE;
+    --relay: #C1272D;      /* crisis red — accent + ledger spine */
+    --relay-soft: #FBEBEA;
+    --verified: #2E7D5B;   /* proven / closed */
+    --verified-soft: #E6F2EC;
+    --amber: #B9791C;      /* drift / at-risk */
+    --amber-soft: #FBF0DC;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    font-feature-settings: "cv05", "ss01";
+    padding: 52px 56px 44px;
+    width: 1600px;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+
+  /* ---- masthead ---- */
+  header { display: flex; align-items: flex-end; justify-content: space-between; border-bottom: 2.5px solid var(--ink); padding-bottom: 18px; }
+  .brand { display: flex; align-items: baseline; gap: 16px; }
+  .mark { font-size: 46px; font-weight: 800; letter-spacing: -1.5px; }
+  .mark .dot { color: var(--relay); }
+  .tagline { font-size: 15px; color: var(--slate); font-weight: 500; letter-spacing: .2px; }
+  .meta { text-align: right; font-size: 12.5px; color: var(--slate); line-height: 1.55; }
+  .meta b { color: var(--ink); font-weight: 650; }
+  .track { display: inline-block; margin-top: 6px; padding: 3px 10px; border: 1.5px solid var(--relay); color: var(--relay); border-radius: 3px; font-size: 11px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; }
+
+  /* ---- section eyebrow ---- */
+  .eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 2.2px; text-transform: uppercase; color: var(--slate); display: flex; align-items: center; gap: 10px; margin: 30px 0 14px; }
+  .eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--hair); }
+
+  /* ---- Slack surfaces band ---- */
+  .surfaces { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; }
+  .surface { background: var(--panel); border: 1px solid var(--hair); border-top: 3px solid #4A154B; border-radius: 7px; padding: 13px 14px; }
+  .surface h4 { font-size: 13.5px; font-weight: 700; margin-bottom: 4px; }
+  .surface p { font-size: 11.5px; color: var(--slate); line-height: 1.45; }
+  .surface .chan { color: #4A154B; font-weight: 650; }
+
+  /* ---- flow arrows ---- */
+  .down { display: flex; justify-content: center; gap: 5px; color: var(--slate); font-size: 12px; margin: 9px 0; letter-spacing: 2px; }
+
+  /* ---- core: the six-verb loop over the ledger spine ---- */
+  .core { background: var(--panel); border: 1px solid var(--hair); border-radius: 10px; padding: 22px 24px 24px; position: relative; }
+  .core-label { position: absolute; top: -10px; left: 22px; background: var(--panel); padding: 0 9px; font-size: 11px; font-weight: 700; letter-spacing: 1.4px; text-transform: uppercase; color: var(--ink); }
+  .core-label .svc { color: var(--slate); font-weight: 500; text-transform: none; letter-spacing: 0; }
+
+  .loop { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0; position: relative; }
+  .verb { padding: 0 13px; position: relative; }
+  .verb:not(:last-child)::after { content: "→"; position: absolute; right: -8px; top: 20px; color: var(--relay); font-size: 18px; font-weight: 700; z-index: 2; }
+  .vhead { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; }
+  .vnum { width: 22px; height: 22px; border-radius: 50%; background: var(--relay); color: #fff; font-size: 11.5px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex: none; }
+  .vname { font-size: 17px; font-weight: 750; letter-spacing: -.3px; }
+  .verb ul { list-style: none; }
+  .verb li { font-size: 11.5px; color: var(--slate); line-height: 1.5; padding-left: 11px; position: relative; }
+  .verb li::before { content: ""; position: absolute; left: 0; top: 8px; width: 4px; height: 4px; border-radius: 50%; background: var(--hair); }
+  .verb li b { color: var(--ink); font-weight: 650; }
+  .verb .gate { color: var(--relay); font-weight: 700; }
+  .verb .green { color: var(--verified); font-weight: 700; }
+
+  /* the ledger spine */
+  .spine { margin-top: 20px; border-radius: 8px; background: linear-gradient(90deg, var(--relay-soft), #fff 60%); border: 1.5px solid var(--relay); padding: 13px 16px; display: flex; align-items: center; gap: 16px; }
+  .spine .badge { font-size: 10.5px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; color: #fff; background: var(--relay); padding: 5px 10px; border-radius: 4px; flex: none; }
+  .spine .desc { font-size: 12.5px; color: var(--ink); line-height: 1.5; }
+  .spine .desc b { font-weight: 700; }
+  .events { display: flex; flex-wrap: wrap; gap: 5px 6px; margin-left: auto; max-width: 620px; justify-content: flex-end; }
+  .ev { font-size: 10px; padding: 2.5px 7px; border: 1px solid var(--relay); color: var(--relay); border-radius: 20px; background: #fff; white-space: nowrap; }
+
+  /* ---- substrate ---- */
+  .substrate { display: grid; grid-template-columns: 1.15fr 1fr 1.15fr; gap: 14px; }
+  .store { background: var(--panel); border: 1px solid var(--hair); border-radius: 8px; padding: 14px 16px; }
+  .store h4 { font-size: 13.5px; font-weight: 750; display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .store h4 .tag { font-size: 9.5px; font-weight: 700; color: var(--slate); border: 1px solid var(--hair); border-radius: 3px; padding: 1.5px 6px; letter-spacing: .4px; }
+  .store p { font-size: 11.5px; color: var(--slate); line-height: 1.5; }
+  .store p b { color: var(--ink); font-weight: 650; }
+
+  /* ---- two-column: qualifying tech + invariants ---- */
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 26px; }
+  .qt { display: flex; flex-direction: column; gap: 10px; }
+  .qrow { display: flex; gap: 13px; align-items: flex-start; background: var(--panel); border: 1px solid var(--hair); border-left: 3px solid var(--verified); border-radius: 7px; padding: 12px 15px; }
+  .qrow .k { font-size: 13px; font-weight: 750; min-width: 132px; }
+  .qrow .k span { display: block; font-size: 10.5px; font-weight: 600; color: var(--verified); letter-spacing: .3px; margin-top: 2px; }
+  .qrow .v { font-size: 11.5px; color: var(--slate); line-height: 1.5; }
+  .qrow .v b { color: var(--ink); font-weight: 650; }
+
+  .inv { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+  .icard { background: var(--relay-soft); border: 1px solid #F0D5D3; border-radius: 7px; padding: 11px 13px; }
+  .icard h5 { font-size: 12px; font-weight: 750; color: var(--relay); margin-bottom: 3px; }
+  .icard p { font-size: 10.8px; color: #6A4B49; line-height: 1.45; }
+
+  /* ---- footer ---- */
+  footer { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--hair); display: flex; justify-content: space-between; align-items: center; font-size: 11.5px; color: var(--slate); }
+  footer .host b { color: var(--ink); font-weight: 650; }
+  footer .stamp { font-weight: 650; color: var(--ink); }
+  .pill { display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 10.5px; font-weight: 650; }
+  .pill.green { background: var(--verified-soft); color: var(--verified); }
+</style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <div class="mark">Relay<span class="dot">.</span></div>
+      <div class="tagline">Verified crisis coordination inside Slack — every need tracked, every promise proven.</div>
+    </div>
+    <div class="meta">
+      <div><b>Slack Agent Builder Challenge</b></div>
+      <div>Bolt&nbsp;JS · TypeScript · event-sourced</div>
+      <div class="track">Agent for Good</div>
+    </div>
+  </header>
+
+  <div class="eyebrow">Slack surface — where coordinators, volunteers &amp; judges work</div>
+  <div class="surfaces">
+    <div class="surface"><h4>Channels</h4><p><span class="chan">#relay-intake</span> · <span class="chan">#relay-dispatch</span> · <span class="chan">#relay-volunteers</span> · <span class="chan">#relay-hq</span></p></div>
+    <div class="surface"><h4>App Home</h4><p>Live operations board: attention list, drifting obligations, filters, SLA / verification policy</p></div>
+    <div class="surface"><h4>Dispatch cards &amp; modals</h4><p>Confidence chips (stated / inferred / unknown), evidence packet, reveal-with-audit</p></div>
+    <div class="surface"><h4>Assistant — Ask-Relay</h4><p>Suggested prompts, grounded cited answers, refuses out-of-scope</p></div>
+    <div class="surface"><h4>Slash <span class="mono">/relay</span></h4><p>sitrep · report · volunteer · demo start / reset</p></div>
+    <div class="surface"><h4>#judges-start-here</h4><p>▶ Run flood demo · ↺ Reset · 🧭 Tour — self-serve</p></div>
+  </div>
+
+  <div class="down">▼ &nbsp; Events API · interactivity · slash · assistant threads &nbsp; ▼</div>
+
+  <div class="core">
+    <div class="core-label">relay-core &nbsp;<span class="svc">· single Node service · ack &lt; 3s, work async</span></div>
+
+    <div class="loop">
+      <div class="verb">
+        <div class="vhead"><div class="vnum">1</div><div class="vname">Intake</div></div>
+        <ul>
+          <li><b>ingest</b> — Slack events, transport dedupe</li>
+          <li>queue seam: <b>BullMQ</b> / inline</li>
+          <li>EN + Tamil-English code-mix</li>
+        </ul>
+      </div>
+      <div class="verb">
+        <div class="vhead"><div class="vnum">2</div><div class="vname">Triage</div></div>
+        <ul>
+          <li><b>extraction</b> → NeedDraft (Zod)</li>
+          <li>severity floor · gazetteer geocode</li>
+          <li>dedupe: contact blind-index + fuzzy</li>
+          <li>low confidence → <span class="gate">NEEDS_REVIEW</span></li>
+        </ul>
+      </div>
+      <div class="verb">
+        <div class="vhead"><div class="vnum">3</div><div class="vname">Match</div></div>
+        <ul>
+          <li><b>scorer</b> — skill · proximity · load · language</li>
+          <li>top-3, LLM rationale (fact-checked)</li>
+          <li>coordinator <span class="gate">assigns</span></li>
+        </ul>
+      </div>
+      <div class="verb">
+        <div class="vhead"><div class="vnum">4</div><div class="vname">Commit</div></div>
+        <ul>
+          <li>obligation + <b>SLA</b> clock</li>
+          <li><b>drift engine</b> — nudge → release</li>
+          <li>overdue → <span class="gate">reassign</span> to a 2nd volunteer</li>
+        </ul>
+      </div>
+      <div class="verb">
+        <div class="vhead"><div class="vnum">5</div><div class="vname">Verify</div></div>
+        <ul>
+          <li><b>evidence</b>: photo · location · recipient</li>
+          <li>coordinator sign-off</li>
+          <li>close-gate: <span class="green">L3 / L2 by severity</span></li>
+        </ul>
+      </div>
+      <div class="verb">
+        <div class="vhead"><div class="vnum">6</div><div class="vname">Report</div></div>
+        <ul>
+          <li><b>narrate</b> — sitrep · donor report</li>
+          <li><span class="green">{{stat:*}}</span> number integrity</li>
+          <li>PII-redacted · Canvas + Markdown</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="spine">
+      <div class="badge">Append-only ledger</div>
+      <div class="desc"><b>need_events</b> — the source of truth. Every state change is a typed, appended event (DB-trigger enforces immutability); current state is a <b>projection</b>. The LLM proposes; a pure engine decides; <b>humans confirm every consequential transition.</b></div>
+      <div class="events">
+        <span class="ev">NeedCreated</span><span class="ev">ExtractionCompleted</span><span class="ev">DuplicateProposed</span><span class="ev">TriageConfirmed</span><span class="ev">MatchSuggested</span><span class="ev">Assigned</span><span class="ev">Nudged</span><span class="ev">ClaimReleased</span><span class="ev">Reassigned</span><span class="ev">EvidenceAttached</span><span class="ev">RecipientConfirmed</span><span class="ev">CoordinatorSignedOff</span><span class="ev">Verified</span><span class="ev">Closed</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="down">▼ &nbsp; projections · queries · encrypted writes &nbsp; ▼</div>
+
+  <div class="substrate">
+    <div class="store"><h4>Postgres 16 <span class="tag">+ pgvector</span></h4><p><b>need_events</b> (append-only) · projections · <b>contact_vault</b> (AES-256-GCM, PII only here) · volunteers · obligations · evidence · localities · audit_log</p></div>
+    <div class="store"><h4>Redis 7 <span class="tag">BullMQ</span></h4><p>Intake pipeline queue · SLA timers · the 60-second <b>drift sweep</b> · rate-limited fan-out</p></div>
+    <div class="store"><h4>LLM <span class="tag">provider-agnostic</span></h4><p>Claude <b>or</b> OpenAI via one env var · forced tool-use + Zod at the boundary · <b>every feature falls back to a deterministic extractor/template with no key</b></p></div>
+  </div>
+
+  <div class="eyebrow">Qualifying technologies &amp; the invariants that make Relay <em>Relay</em></div>
+  <div class="split">
+    <div class="qt">
+      <div class="qrow"><div class="k">Slack AI<span>capabilities</span></div><div class="v"><b>Ask-Relay assistant</b> — suggested prompts, "thinking" status, answers grounded in the PII-free ledger with cited permalinks; refuses out-of-scope &amp; emergency-dispatch questions.</div></div>
+      <div class="qrow"><div class="k">Real-Time Search<span>RTS API</span></div><div class="v"><b>assistant.search.context</b> client (throttled + retrying) grounds Ask-Relay in live field context; lights up with a user token, else degrades to ledger-only. Results cited, never persisted.</div></div>
+      <div class="qrow"><div class="k">MCP<span>integration</span></div><div class="v">Relay is <b>exposed as a read-only MCP server</b> (search_needs · get_need · get_sitrep) so Claude Desktop &amp; other agents query live operations — over the same PII-free projections.</div></div>
+    </div>
+    <div class="inv">
+      <div class="icard"><h5>Append-only truth</h5><p>No UPDATE status anywhere; state is a replay of events. The audit trail is the product.</p></div>
+      <div class="icard"><h5>Humans in command</h5><p>Confirm · assign · merge · sign-off · close all require a human actor — the engine rejects, it doesn't trust callers.</p></div>
+      <div class="icard"><h5>PII, minimized</h5><p>Beneficiary contact only in the encrypted vault; ledger &amp; LLM inputs are zero-copy. Reveal writes an audit event.</p></div>
+      <div class="icard"><h5>Numbers never guessed</h5><p>Reports render {{stat:*}} tokens; a validator rejects any figure not backed by the ledger — proven to fall back to template.</p></div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="host">Hosting: <b>AWS</b> — ECS Fargate + ALB + CloudFront (TLS) · RDS Postgres · ElastiCache · CDK. Runs fully <b>hermetically</b> with zero infra for tests &amp; the offline demo.</div>
+    <div><span class="pill green">436 hermetic + 17 Postgres tests</span> &nbsp; <span class="stamp">86.1% field extraction · 100% critical-severity recall</span></div>
+  </footer>
+
+</body>
+</html>

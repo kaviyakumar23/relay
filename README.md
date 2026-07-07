@@ -6,12 +6,20 @@ Built for the **Slack Agent Builder Challenge 2026 — Agent for Good track**. U
 
 **The loop:** Intake → Triage → Match → Commit → Verify → Report — on an append-only, event-sourced ledger. The LLM interprets language; deterministic code controls state. Humans confirm every consequential transition.
 
+## What exists today (and why Relay is different)
+
+Crisis coordination tools exist, but none close the loop *inside the conversation, with proof*. **Ushahidi / Sahana** are web crisis-mapping platforms that live outside the tools volunteers chat in and don't track who committed to what. **WhatsApp groups** are where coordination actually happens — with zero structure or accountability. **Slack incident tools** (incident.io and similar) target internal IT incidents and close on status flags, not verified fulfillment. Relay's wedge: coordination inside Slack, promises tracked as obligations **with proof of delivery**, and donor-grade accountability.
+
+## Measured extraction quality
+
+On a 40-message labelled set (`npm run eval`, reproducible with no API key via the deterministic baseline): **86.1% field-level accuracy · 100% critical-severity recall · 100% contact/locality accuracy.** These are the only numbers we publish — the product's ethos forbids invented impact statistics.
+
 ## 60-second local setup
 
 ```bash
 npm install
 docker compose up -d          # Postgres 16 (pgvector) + Redis 7
-cp .env.example .env          # fill in Slack + Anthropic keys (see below)
+cp .env.example .env          # fill in Slack + an LLM key (OpenAI or Anthropic; see below)
 npm run db:migrate
 npm run seed                  # demo gazetteer + volunteer roster
 npm run dev                   # Socket Mode against your dev Slack app
