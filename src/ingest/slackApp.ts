@@ -191,7 +191,20 @@ async function resolveRoles(client: WebClient, roles: MutableRoles, cfg: Channel
   const hqId = cfg.hqChannelId;
   const judgesId = cfg.judgesChannelId;
   const needsLookup = !intakeId || !dispatchId || !hqId || !judgesId;
-  const byName = needsLookup ? await channelsByName(client) : new Map<string, string>();
+  // Best-effort: a bad/placeholder token, a transient Slack error, or channels not
+  // created yet must NOT crash-loop boot. Resolve what we can and start regardless —
+  // /healthz then comes up, and roles fill in from env overrides or a later restart.
+  let byName = new Map<string, string>();
+  if (needsLookup) {
+    try {
+      byName = await channelsByName(client);
+    } catch (err) {
+      logger.warn(
+        { err: (err as Error).message },
+        'resolveRoles: channel lookup failed — starting with unresolved roles (set RELAY_*_CHANNEL or fix the token)',
+      );
+    }
+  }
   roles.intakeChannelId = intakeId ?? byName.get(cfg.intakeChannelName ?? DEFAULT_INTAKE_NAME) ?? '';
   roles.dispatchChannelId = dispatchId ?? byName.get(cfg.dispatchChannelName ?? DEFAULT_DISPATCH_NAME) ?? '';
   roles.hqChannelId = hqId ?? byName.get(cfg.hqChannelName ?? DEFAULT_HQ_NAME) ?? roles.dispatchChannelId;
@@ -1710,8 +1723,13 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       },
       'relay up',
     );
-    // Publish the judge on-ramp once the app is up (idempotent guard: only if resolvable).
-    await publishJudgeWelcome();
+    // Publish the judge on-ramp once the app is up (best-effort — never let a Slack
+    // API failure after the server is listening crash the process / fail health checks).
+    try {
+      await publishJudgeWelcome();
+    } catch (err) {
+      logger.warn({ err: (err as Error).message }, 'relay: could not publish judge welcome (non-fatal)');
+    }
   };
 
   return { app, start, refreshHomes };
