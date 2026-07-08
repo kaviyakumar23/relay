@@ -256,6 +256,19 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
+// A long-running server must not die from a single stray background rejection.
+// Slack side-effects (a startup post, a drift nudge, an App Home refresh) can be
+// fire-and-forget; if one rejects while a machine is briefly mis-tokened or a
+// channel is unresolved, Node's default is to terminate the process — which would
+// take /healthz down and crash-loop the deploy. Log and keep serving instead. A
+// genuinely fatal boot error still exits via main().catch below.
+process.on('unhandledRejection', (reason) => {
+  logger.error({ err: reason instanceof Error ? reason.message : String(reason) }, 'relay: unhandled rejection (kept alive)');
+});
+process.on('uncaughtException', (err) => {
+  logger.error({ err: err.message }, 'relay: uncaught exception (kept alive)');
+});
+
 main().catch((err) => {
   logger.error({ err }, 'relay: failed to start');
   process.exit(1);
