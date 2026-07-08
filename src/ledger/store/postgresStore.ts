@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { logger } from '../../lib/logger';
 import { assertNoRawContent, type NeedEvent } from '../events';
 import type { Actor, ActorType, ProjectionCache } from '../types';
 import { ConcurrencyError } from './errors';
@@ -40,6 +41,13 @@ const INSERT_EVENT = `INSERT INTO need_events
  */
 export class PostgresEventStore implements EventStore {
   private readonly pool: pg.Pool;
+  /**
+   * Whether needs.embedding exists — i.e. pgvector was present at migrate time (001 adds
+   * the column only when the `vector` extension installs). null = not yet detected. On a
+   * plain Postgres (self-hosted Fly) the column is absent, so the vector dedupe path is
+   * skipped and dedupe uses pg_trgm. Detected once via information_schema, then cached.
+   */
+  private hasEmbedding: boolean | null = null;
 
   constructor(opts: { connectionString?: string; pool?: pg.Pool } = {}) {
     this.pool = opts.pool ?? new Pool({ connectionString: opts.connectionString });
@@ -48,6 +56,30 @@ export class PostgresEventStore implements EventStore {
   /** Create the public_id sequence if needed (the schema migration owns the tables). */
   async init(): Promise<void> {
     await this.pool.query('CREATE SEQUENCE IF NOT EXISTS needs_public_seq START 1');
+    // Warm the pgvector-presence cache at boot so the mode is logged once and every
+    // later dedupe call is a cache hit. Never fatal: absence just means the pg_trgm path.
+    const hasEmbedding = await this.embeddingAvailable();
+    logger.info(
+      { hasEmbedding },
+      `postgres store: embedding dedupe ${hasEmbedding ? 'enabled' : 'disabled (pg_trgm)'}`,
+    );
+  }
+
+  /**
+   * Does the needs.embedding column exist? Queried once from information_schema and
+   * cached. When absent (no pgvector), callers skip the ::vector cast and the embedding
+   * SELECT so a missing column can NEVER throw — dedupe degrades to pg_trgm.
+   */
+  private async embeddingAvailable(): Promise<boolean> {
+    if (this.hasEmbedding === null) {
+      const res = await this.pool.query(
+        `SELECT 1 FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'needs' AND column_name = 'embedding'
+          LIMIT 1`,
+      );
+      this.hasEmbedding = (res.rowCount ?? 0) > 0;
+    }
+    return this.hasEmbedding;
   }
 
   private static rowToEvent(row: EventRow): NeedEvent {
@@ -221,7 +253,11 @@ export class PostgresEventStore implements EventStore {
       vals.push(keys.dedupeText);
       sets.push(`dedupe_text = $${vals.length}`);
     }
-    if (keys.embedding !== undefined) {
+    // Touch the embedding column ONLY when pgvector added it (see 001 migration). On a
+    // plain Postgres the column is absent; the embedding is silently ignored — the vector
+    // path is dormant without an embeddings key anyway — while contact_hash + dedupe_text
+    // still persist. contact_hash + dedupe_text are enough for the pg_trgm dedupe path.
+    if (keys.embedding !== undefined && (await this.embeddingAvailable())) {
       // pgvector accepts the textual form '[1,2,3]'; null clears the column.
       vals.push(keys.embedding === null ? null : `[${keys.embedding.join(',')}]`);
       sets.push(`embedding = $${vals.length}::vector`);
@@ -231,6 +267,12 @@ export class PostgresEventStore implements EventStore {
   }
 
   async findDedupeCandidates(q: DedupeCandidateQuery): Promise<DedupeCandidate[]> {
+    // Reference the embedding column only when pgvector added it; on a plain Postgres the
+    // column doesn't exist, so select a NULL placeholder — the JS cosine branch then stays
+    // off (both sides null) and dedupe falls back to the pg_trgm dedupe_text signal (see
+    // src/pipeline/dedupe.ts fuzzyScore). Behaviour is byte-identical when the column IS
+    // present. A constant, never user input — no injection surface.
+    const embeddingSelect = (await this.embeddingAvailable()) ? 'embedding' : 'NULL AS embedding';
     const res = await this.pool.query<{
       id: string;
       public_id: string;
@@ -239,7 +281,7 @@ export class PostgresEventStore implements EventStore {
       embedding: unknown;
       status: string;
     }>(
-      `SELECT id, public_id, contact_hash, dedupe_text, embedding, status
+      `SELECT id, public_id, contact_hash, dedupe_text, ${embeddingSelect}, status
          FROM needs
         WHERE type = $1
           AND status NOT IN ('DUPLICATE', 'CLOSED', 'CANCELLED', 'EXPIRED')

@@ -34,7 +34,9 @@ No keys yet? `npm test` (hermetic, zero infra) and `npm run demo` (in-memory end
 3. Create the channels `#relay-intake` `#relay-dispatch` `#relay-volunteers` `#relay-hq` `#judges-start-here` and **`/invite @relay` into each** (message events only fire for channels the bot is in).
 4. Put `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and an app-level `SLACK_APP_TOKEN` (connections:write) in `.env`.
 
-Production runs the `manifest.prod.yaml` app in HTTP mode on AWS (see `infra/`).
+Production runs the `manifest.prod.yaml` app in HTTP mode on **Fly.io** — a Docker
+machine (always-on) with self-hosted Fly Postgres + Upstash Redis and auto-HTTPS on
+`*.fly.dev` (see `docs/DEPLOY.md`).
 
 ## Commands
 
@@ -78,6 +80,7 @@ With no `DATABASE_URL` the server seeds an in-memory demo flood so the tools ret
 ## Docs
 
 - `docs/BUILD-DOC.md` — full build document (product spec, state machine, compliance rules)
+- `docs/DEPLOY.md` — Fly.io production deploy runbook (`fly.toml`)
 - `CLAUDE.md` — engineering invariants (append-only ledger, human gates, PII rules)
 - Architecture diagram: `docs/architecture.png` *(added before submission)*
 

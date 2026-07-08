@@ -1,5 +1,11 @@
 # Relay Infrastructure (AWS CDK)
 
+> **ARCHIVED — not the live deploy.** AWS is account-restricted for this project,
+> so the live host is **Fly.io** (see `docs/DEPLOY.md` + `fly.toml` at the repo
+> root). This CDK stack is retained as reference / a portable alternative — it is
+> code-complete but not what serves the judging window. Everything below describes
+> the AWS path only.
+
 Always-on, cost-guarded AWS hosting for Relay. Infrastructure-as-code so the
 hackathon judging window (Jul 14 – Aug 6) has a stable, reproducible target.
 

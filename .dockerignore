@@ -1,7 +1,8 @@
-# Docker build context = repo root (CDK fromAsset('..')). Excludes must include
-# infra/ and .git — otherwise CDK recursively copies infra/cdk.out into itself
-# (ENAMETOOLONG). Keep src/, db/, demo/, seed/ — the running app reads scenario
-# and seed files at runtime (live injector + `npm run seed`).
+# Docker build context = repo root — used by `fly deploy` (repo Dockerfile) and by
+# the archived AWS CDK (fromAsset('..')). Excluding infra/, .git, docs, tests keeps
+# the build context small and also stops CDK from recursively copying infra/cdk.out
+# into itself (ENAMETOOLONG). Keep src/, db/, demo/, seed/ — the running app reads
+# scenario and seed files at runtime (live injector + `npm run seed`).
 node_modules
 infra
 .git

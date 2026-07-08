@@ -5,30 +5,25 @@ on:
   push:
     branches: [main]
     paths:
-      - 'infra/**'
+      - 'fly.toml'
       - 'src/**'
       - 'Dockerfile'
 
 permissions:
-  id-token: write # OIDC
   contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    # Set repo variable AWS_DEPLOY_ROLE_ARN to RelayCiStack's DeployRoleArn output.
-    if: ${{ vars.AWS_DEPLOY_ROLE_ARN != '' }}
+    # `secrets` can't be used in a job-level `if:`, so we lift the token into env
+    # and guard the deploy step on it — the job is a no-op on forks / until
+    # FLY_API_TOKEN is set (repo Settings → Secrets and variables → Actions).
+    # Mint a token with `fly tokens create deploy` (see docs/DEPLOY.md).
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ap-south-1
-      - name: Deploy RelayStack
-        working-directory: infra
-        run: |
-          npm ci
-          npx cdk deploy RelayStack --require-approval never
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - name: Deploy to Fly.io
+        if: ${{ env.FLY_API_TOKEN != '' }}
+        run: flyctl deploy --remote-only

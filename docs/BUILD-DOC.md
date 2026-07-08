@@ -267,7 +267,7 @@ Bolt-JS app (Node + TypeScript, single service "relay-core")
    └─ demo/          injector · reset · judge-tour handlers
 Postgres 16 (+ pgvector for dedupe embeddings) · Redis (BullMQ)
 Anthropic API (Claude) · Slack Web API
-Hosting: AWS (ECS Fargate + ALB + CloudFront, RDS, ElastiCache — see infra/) · UptimeRobot on /healthz (deep probe: `GET /healthz` actually queries Postgres + PINGs Redis and returns 503 when a wired dependency is down, so a dead pg/redis pulls the task from rotation instead of reporting a static 200). Schema migrations run on boot (`runStartupMigrations`, advisory-locked + idempotent) before the app serves; a migration failure exits non-zero so a schema-less task never takes traffic.
+Hosting: Fly.io (always-on Docker machine `min_machines_running=1` + self-hosted Fly Postgres + Upstash Redis, auto-HTTPS on `*.fly.dev` — see `fly.toml` + `docs/DEPLOY.md`; the AWS CDK in `infra/` is archived as a portable alternative because AWS is account-restricted) · UptimeRobot on /healthz (deep probe: `GET /healthz` actually queries Postgres + PINGs Redis and returns 503 when a wired dependency is down, so a dead pg/redis pulls the machine from rotation instead of reporting a static 200). Schema migrations run on boot (`runStartupMigrations`, advisory-locked + idempotent) before the app serves; a migration failure exits non-zero so a schema-less machine never takes traffic.
 ```
 
 ### 9.2 Non-negotiable engineering rules
@@ -288,7 +288,7 @@ See `db/migrations/001_init.sql` (raw SQL is the contract; raw `pg` driver, no O
 
 ### 9.5 App manifests
 
-`manifest.dev.yaml` (Socket Mode, local dev) · `manifest.prod.yaml` (HTTP mode, request URLs = CloudFront domain from `infra/`).
+`manifest.dev.yaml` (Socket Mode, local dev) · `manifest.prod.yaml` (HTTP mode, request URLs = the Fly host `https://relay-crisis.fly.dev/slack/events` — see `docs/DEPLOY.md`).
 
 ---
 
@@ -456,7 +456,7 @@ Daily 10:00 sync (15 min) + 21:30 demo-path run · the **demo path is sacred**: 
 | Tamil-English extraction < 80% | M×H | §10.3 decision gate Jul 8; English-led demo path ready |
 | Slack rate limits garble injector | M×M | Shared token bucket; 40s spread; rehearsed ×10 |
 | Live-demo LLM latency on camera | H×M | Pre-warm; placeholder→update pattern reads as "thinking"; video allows retakes; judges get compressed SLAs not live LLM races |
-| Hosting sleeps mid-judging | L×H | Always-on ECS service + UptimeRobot + daily smoke calendar |
+| Hosting sleeps mid-judging | L×H | Fly always-on (`min_machines_running=1`, `auto_stop_machines=false`) + UptimeRobot on `/healthz` + daily smoke calendar |
 | Photo GPS assumptions fail | H×M | Designed out — explicit locality confirm (§F5) |
 | Scope creep past freeze | H×H | Freeze ritual + two-person rule + cut lines |
 | Devpost/deadline-day outage | L×H | Submit Jul 12; confirmation archived |

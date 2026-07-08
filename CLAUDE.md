@@ -45,7 +45,7 @@ Relay is a Slack-native agent for volunteer crisis response: **Intake → Triage
 - `src/demo/` — injector, reset, seed, storyboard driver
 - `src/llm/` — provider seam (structured outputs), per-task model config, prompts P-1..P-7 in `src/llm/prompts/`
 - `src/lib/` — logger, migrate, ids, safeLog, vault crypto
-- `eval/` — labeled intake set + gates; `demo/scenarios/` — injector scripts; `seed/` — gazetteer + roster; `infra/` — AWS CDK
+- `eval/` — labeled intake set + gates; `demo/scenarios/` — injector scripts; `seed/` — gazetteer + roster; `fly.toml` + `docs/DEPLOY.md` — Fly.io deploy (live host); `infra/` — archived AWS CDK (reference alt; AWS is account-restricted)
 
 ## Reuse provenance — port, don't import
 

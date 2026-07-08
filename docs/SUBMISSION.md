@@ -38,6 +38,7 @@ Relay uses **all three**, each with a real job.
 - **Measured, reproducible quality.** On a 40-message labelled set (`npm run eval`): **86.1% field-level extraction accuracy, 100% critical-severity recall, 100% contact/locality accuracy.**
 - **Provider-agnostic LLM.** Claude or OpenAI via one env var; forced tool-use + Zod at the boundary. **Every AI feature falls back to a deterministic extractor/template with no key**, so the whole product — and the offline demo — runs with zero configuration.
 - **Tested.** 436 hermetic unit tests (zero infra) + 17 Postgres integration tests. TypeScript strict, event-correlated structured logs.
+- **Hosting: Fly.io** — an always-on Docker machine + self-hosted Postgres + Upstash Redis, with auto-HTTPS on `*.fly.dev`. One machine is pinned up so the SLA drift tick and scheduler never sleep and the demo never cold-starts; a deep `/healthz` probe (real pg query + Redis PING) gates rotation, and schema migrations run on boot. The whole product still runs **fully hermetically with zero infra** for `npm test` and the offline demo.
 
 ## Design
 

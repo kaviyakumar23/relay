@@ -13,6 +13,14 @@ import { migrate } from '../../src/lib/migrate';
 // findDedupeCandidates, plus the vector(1536) ::vector cast and pg_trgm). Skipped
 // unless DATABASE_URL is set. Needs are is_demo and purged in afterAll; the two
 // localities this file inserts are FK parents of those needs, deleted after the purge.
+//
+// This suite runs against pgvector (local docker compose, pgvector/pgvector:pg16), so the
+// embedding column exists and the vector path IS exercised here. pgvector is OPTIONAL in
+// production: on a plain Postgres (self-hosted Fly, no `vector` extension) 001 skips the
+// embedding column, and postgresStore guards both the ::vector write and the embedding
+// SELECT behind a cached column-presence check — dedupe degrades to pg_trgm and the app
+// still boots. That absent-pgvector branch is covered by the plain-Postgres migrate boot
+// check (see the verifier note), not by this suite (which needs pgvector present).
 const DB = process.env.DATABASE_URL;
 
 describe.skipIf(!DB)('Postgres dedupe (integration)', () => {

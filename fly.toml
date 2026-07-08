@@ -1,0 +1,51 @@
+# fly.toml — Relay production deploy on Fly.io.
+#
+# Why Fly (not AWS): the AWS account is under an account-level restriction, so the
+# live judging deploy runs here. Fly builds our repo-root Dockerfile and hands us a
+# *.fly.dev HTTPS URL out of the box — so the old CloudFront layer (which existed
+# only to give Slack a TLS request URL) is gone. Full runbook: docs/DEPLOY.md.
+
+app = 'relay-crisis'
+
+# Singapore — the closest Fly region to a Chennai/India-style demo. Changeable:
+# `fly regions set <code>` (e.g. 'bom' Mumbai) if a nearer region is available.
+primary_region = 'sin'
+
+[build]
+  # No dockerfile key needed — Fly uses the repo-root Dockerfile by default
+  # (FROM node:24-slim; CMD `npx tsx src/server.ts` — TS runs at runtime, no build step).
+
+[env]
+  PORT = '3000'
+  LOG_LEVEL = 'info'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+
+  # ALWAYS-ON. Relay is not a plain request/response web app: the drift tick (60s
+  # SLA sweep + reassignment proposals) and the BullMQ scheduler must keep running
+  # even with zero inbound traffic, and the judge demo must never cold-start. So we
+  # pin at least one machine up and never auto-stop it.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # Deep health probe. GET /healthz actually queries Postgres + PINGs Redis and
+  # returns 503 when a wired dependency is down, so a machine with a dead pg/redis
+  # is pulled from rotation instead of serving traffic against a broken backend.
+  # A 200 (2xx) marks the machine healthy.
+  [[http_service.checks]]
+    method = 'get'
+    path = '/healthz'
+    interval = '15s'
+    timeout = '5s'
+    # grace_period covers boot: server.ts runs advisory-locked, idempotent schema
+    # migrations (runStartupMigrations) BEFORE it serves, so the first probe waits.
+    grace_period = '20s'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  # 1 GB, not the 512 MB default: tsx type-strips and runs TypeScript at runtime
+  # (no compiled dist), which pushes RSS past 512 MB and risks OOM under load.
+  memory = '1gb'

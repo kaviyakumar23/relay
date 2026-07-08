@@ -2,7 +2,23 @@
 -- Source of truth = need_events (append-only). Everything else is projection or registry.
 -- On RDS: run as master user so CREATE EXTENSION succeeds.
 
-create extension if not exists vector;
+-- pgvector is OPTIONAL. A plain self-hosted Postgres (e.g. Fly Postgres, or a bare
+-- postgres:16-alpine) has no `vector` extension available. The embedding dedupe path is
+-- dormant anyway — it only lights up with an OpenAI embeddings key, and dedupe already
+-- falls back to pg_trgm — so tolerate a failed CREATE EXTENSION rather than abort the
+-- whole migration (which would leave `needs` uncreated and the app unable to boot).
+-- When pgvector IS present (local docker compose, pgvector/pgvector:pg16) the extension,
+-- the embedding column and its index are all created below and the vector path still runs.
+do $$
+begin
+  create extension if not exists vector;
+exception
+  when others then
+    raise notice 'pgvector unavailable — embedding dedupe disabled, using pg_trgm';
+end;
+$$;
+
+-- pg_trgm ships with every standard Postgres — the trigram fallback is always available.
 create extension if not exists pg_trgm;
 
 -- Transport-level Slack event dedupe (Slack retries deliveries; business-level
@@ -40,10 +56,26 @@ create table if not exists needs (
   source_permalink text,
   confidence jsonb not null default '{}',       -- per-field stated|inferred|unknown
   dedupe_cluster uuid,
-  embedding vector (1536),                      -- text-embedding-3-small; null when pg_trgm fallback
+  -- embedding vector(1536) is added conditionally in the DO block below, ONLY when
+  -- pgvector is installed. On a plain Postgres the column is simply absent and dedupe
+  -- uses pg_trgm; postgresStore detects the column's presence at runtime.
   is_demo boolean not null default false,
   created_at timestamptz not null default now()
 );
+
+-- The embedding column + its ANN index exist ONLY when pgvector is installed. On a plain
+-- Postgres (no `vector` extension) this block is a no-op: `needs` works without an
+-- embedding column and the app detects its absence (postgresStore) and stays on pg_trgm.
+-- plpgsql defers parse-analysis of these utility statements to execution, so the `vector`
+-- type is never resolved unless the guard passes — the DO block is valid on ANY Postgres.
+do $$
+begin
+  if exists (select 1 from pg_extension where extname = 'vector') then
+    alter table needs add column if not exists embedding vector(1536); -- text-embedding-3-small
+    create index if not exists idx_needs_embedding on needs using hnsw (embedding vector_cosine_ops);
+  end if;
+end;
+$$;
 
 create table if not exists need_events (
   seq bigserial primary key,

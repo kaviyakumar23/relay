@@ -76,9 +76,21 @@ npm run eval             # extraction eval harness (needs the LLM key once P-1 l
 npm run scenario:lint    # validate scenario + eval set schemas
 ```
 
-## 8. Production (AWS) — later
+## 8. Production (Fly.io) — later
 
-Infra is code-complete in `infra/` (see `infra/README.md`). Deploy when the app is
-functional (~Day 2–3): `cd infra && npx cdk bootstrap && npx cdk deploy RelayStack RelayCiStack`.
-Then set the four Secrets Manager values, point `manifest.prod.yaml` at the CloudFront
-domain, and switch to the HTTP-mode prod app.
+The live host is **Fly.io** (AWS is account-restricted for this project). Full
+runbook: **`docs/DEPLOY.md`**. In short, from the repo root:
+
+```bash
+fly auth login
+fly apps create relay-crisis
+fly postgres create --name relay-db --region sin && fly postgres attach relay-db --app relay-crisis
+fly redis create --name relay-redis --region sin   # → set REDIS_URL secret
+fly secrets set --app relay-crisis SLACK_BOT_TOKEN=… SLACK_SIGNING_SECRET=… OPENAI_API_KEY=… CONTACT_VAULT_KEY="$(openssl rand -hex 32)"
+fly deploy --remote-only                            # migrations run on boot
+```
+
+`manifest.prod.yaml` already points at `https://relay-crisis.fly.dev/slack/events`;
+update the prod Slack app from the manifest and switch to the HTTP-mode app. The
+AWS CDK in `infra/` is retained only as a portable alternative (~$55/mo vs Fly's
+~$10–13/mo).
