@@ -57,6 +57,11 @@ export const TRANSITIONS: Record<EventType, TransitionSpec> = {
   DuplicateProposed: T({ from: PRE_ASSIGN, to: 'SAME', humanGate: false }),
   DuplicateConfirmed: T({ from: PRE_ASSIGN, to: 'DUPLICATE', humanGate: true }),
   TriageConfirmed: T({ from: ['TRIAGED', 'NEEDS_REVIEW'], to: 'OPEN', humanGate: true }),
+  // An agent's pledge (Moonshot #2) is a PROPOSAL, not a commitment: it applies from an open need
+  // and moves it to MATCH_SUGGESTED (still awaiting a human), exactly like a matcher's suggestion.
+  // humanGate:false — an agent may propose — but the need does NOT reach CLAIMED here; only the
+  // human-gated Assigned below can commit it, so an agent can never self-assign past the gate.
+  PledgeProposed: T({ from: ['OPEN', 'MATCH_SUGGESTED'], to: 'MATCH_SUGGESTED', humanGate: false }),
   MatchSuggested: T({ from: ['OPEN', 'MATCH_SUGGESTED'], to: 'MATCH_SUGGESTED', humanGate: false }),
   Claimed: T({ from: ASSIGNABLE, to: 'CLAIMED', humanGate: false }),
   Assigned: T({ from: ASSIGNABLE, to: 'CLAIMED', humanGate: true }),

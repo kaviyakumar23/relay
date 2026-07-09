@@ -8,14 +8,20 @@ import { createRelayTools, RELAY_TOOL_INFO, type RelayToolDeps } from './tools';
 // bearer token (see the note at the bottom of this file).
 
 const SERVER_INSTRUCTIONS = [
-  'Relay is a Slack-native agent for verified volunteer crisis response. This MCP server is',
-  'READ-ONLY: it exposes the live relief-operations ledger so an external agent can observe,',
-  'summarise and reason over the response — it can never change state.',
+  'Relay is a Slack-native agent for verified volunteer crisis response. This MCP server exposes',
+  'the live relief-operations ledger so an external agent can observe, summarise and reason over',
+  'the response. Three tools are READ-ONLY; one (pledge_support) is a WRITE tool that only files a',
+  'PROPOSAL — it can never itself change state or commit a volunteer.',
   '',
-  'Tools:',
+  'Read tools:',
   '  • search_needs — list live needs (filter by status/type/severity/locality/only_open).',
   '  • get_need     — full detail for one need by public id (e.g. N-0007), incl. evidence + verification.',
   '  • get_sitrep   — the live situation report as structured counts.',
+  '',
+  'Write tool (opt-in; requires RELAY_MCP_WRITES_ENABLED):',
+  '  • pledge_support — pledge that your agent/org will fulfil an OPEN need. This lands as a PROPOSAL',
+  '    a human coordinator must CONFIRM; Relay never auto-assigns an agent pledge. Once confirmed, the',
+  '    commitment is tracked with the same SLA, drift detection and evidence gating as a human promise.',
   '',
   'Every value is PII-free by construction: beneficiary contact never leaves the encrypted',
   'vault and is never returned here. Numbers are ledger-derived; cite the source_permalink',
@@ -67,6 +73,20 @@ export function createRelayMcpServer(deps: RelayToolDeps): McpServer {
       annotations: { readOnlyHint: true, openWorldHint: false },
     },
     (args) => tools.get_sitrep(args),
+  );
+
+  // The ONE write tool (Moonshot #2). Always registered so the "writes disabled" path is itself
+  // discoverable; it is inert unless deps.write is composed with enabled: true. It only files a
+  // PROPOSAL (never commits), so it is NOT destructive — but it is not read-only either.
+  server.registerTool(
+    RELAY_TOOL_INFO.pledge_support.name,
+    {
+      title: RELAY_TOOL_INFO.pledge_support.title,
+      description: RELAY_TOOL_INFO.pledge_support.description,
+      inputSchema: RELAY_TOOL_INFO.pledge_support.inputSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+    },
+    (args) => tools.pledge_support(args),
   );
 
   return server;

@@ -25,6 +25,7 @@ import { matchRationale } from '../match/rationale';
 import { type LocalityCoord, type ScoreNeed, topN } from '../match/scorer';
 import { loadLocalityCoords, loadSeedVolunteers } from '../match/seedData';
 import { InMemoryVolunteerStore } from '../match/volunteerStore';
+import { agentVolunteerId, createPledgeTool } from '../mcp-server/pledge';
 import { createRelayTools, type NeedReadPort } from '../mcp-server/tools';
 import { computeSitrepStats } from '../narrate/aggregate';
 import { assertNoPii } from '../narrate/redaction';
@@ -1534,6 +1535,231 @@ export async function evaluateSecondScenario(scenario: Scenario, a: HermeticAsse
   return results;
 }
 
+/**
+ * Evaluate Moonshot #2 — "Relay holds AI agents accountable too." On a FRESH, isolated assembly it
+ * plays the flood, confirms triage on the pledge need (human → OPEN), then files an agent pledge
+ * through the REAL pledge_support logic (createPledgeTool) and proves the whole accountability chain
+ * from the ledger — never fabricated:
+ *   1. the pledge lands as an AGENT-actor PledgeProposed and the need is NOT auto-claimed (still
+ *      MATCH_SUGGESTED, no volunteer); an is_agent volunteer is registered for the pledging org,
+ *   2. the agent CANNOT self-assign past the gate — an agent-actor Assigned is REJECTED (HUMAN_GATE),
+ *   3. a human Assigned commits it to the agent volunteer → CLAIMED with a stamped SLA,
+ *   4. the obligation then DRIFTS on the identical projection flags a human promise uses (on time
+ *      before due, drifting past due), and
+ *   5. closes only on a complete EVIDENCE packet — a premature Verified is rejected
+ *      (INSUFFICIENT_EVIDENCE), then photo+locality+recipient+sign-off → Verified → Closed, every
+ *      human-gated step carrying a human actor. One path, no shortcut for the agent.
+ */
+export async function evaluateAgentPledge(scenario: Scenario): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const exp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'pledge_requires_human_confirm' }> =>
+      e.assert === 'pledge_requires_human_confirm',
+  );
+  if (exp === undefined) return results;
+
+  const fail = (detail: string): void => {
+    results.push({ capability: 'agent_pledge', assert: 'pledge_requires_human_confirm', pass: false, detail });
+  };
+
+  const a = buildHermeticAssembly();
+  const run = await runScenario(scenario, a);
+  const seed = mapNeedsByStep(await a.service.listNeeds(), run).get(exp.params.need_ref);
+  if (seed === undefined) {
+    fail(`pledge need ${exp.params.need_ref} not found`);
+    return results;
+  }
+  const needId = seed.need_id;
+  const coordinator = 'demo-coordinator';
+  const now = referenceNow(await a.service.listNeeds());
+
+  // Confirm triage (human) → OPEN so the need is pledgeable (mirrors the coordinator's Confirm click).
+  if (seed.state === 'TRIAGED' || seed.state === 'NEEDS_REVIEW') {
+    await a.service.dispatch(
+      needId,
+      { type: 'TriageConfirmed', payload: {} },
+      {
+        actor: { type: 'human', id: coordinator },
+        at: new Date(now).toISOString(),
+        idempotencyKey: needEventKey(needId, 'TriageConfirmed', 'pledge'),
+        now,
+      },
+    );
+  }
+  const publicId = (await a.store.getPublicId(needId)) ?? needId;
+
+  // File the pledge through the REAL pledge_support logic (agent actor), with writes enabled.
+  const pledger = 'Chennai Food Bank agent';
+  const volId = agentVolunteerId(pledger);
+  const pledge = createPledgeTool({
+    listNeeds: (n) => a.service.listNeeds(n),
+    getPublicId: (id) => a.store.getPublicId(id),
+    dispatch: (id, command, ctx) => a.service.dispatch(id, command, ctx),
+    volunteers: a.volunteerStore,
+    enabled: true,
+    now: () => now,
+    isDemo: true,
+  });
+  const toolRes = await pledge({ need_public_id: publicId, pledged_by: pledger, note: 'can deliver 200 meals by 6pm' });
+  const toolBody = JSON.parse(toolRes.content[0]?.text ?? 'null') as { status?: string };
+
+  // (1) Agent-actor PROPOSAL, not auto-claimed; an is_agent volunteer registered for the pledger.
+  const afterPledge = await a.service.getNeed(needId, now);
+  const pledgeEvent = (await a.service.getEvents(needId)).find((e) => isEvent(e, 'PledgeProposed'));
+  const proposalIsAgent = pledgeEvent?.actor.type === 'agent';
+  const notAutoClaimed = afterPledge?.state === 'MATCH_SUGGESTED' && afterPledge.assigned_volunteer_id === null;
+  const agentRegistered = (await a.volunteerStore.getBySlackUser(volId))?.is_agent === true;
+
+  // (2) The agent CANNOT self-assign past the human gate.
+  const agentAssign = await a.service.dispatch(
+    needId,
+    { type: 'Assigned', payload: { volunteer_id: volId, obligation_id: randomUUID() } },
+    {
+      actor: { type: 'agent', id: volId },
+      at: new Date(now).toISOString(),
+      idempotencyKey: needEventKey(needId, 'Assigned', 'agent-self'),
+    },
+  );
+  const gateHeld = agentAssign.status === 'rejected' && agentAssign.code === 'HUMAN_GATE';
+
+  // (3) A human confirms → CLAIMED to the agent volunteer, SLA stamped exactly as the live Assign handler.
+  const assignedAt = now + 1000;
+  const slaIso = slaDueAtIso(seed.type, seed.severity, assignedAt); // full SLA (not compressed) for a genuine on-time/overdue read
+  const humanAssign = await a.service.dispatch(
+    needId,
+    { type: 'Assigned', payload: { volunteer_id: volId, obligation_id: randomUUID(), sla_due_at: slaIso } },
+    {
+      actor: { type: 'human', id: coordinator },
+      at: new Date(assignedAt).toISOString(),
+      idempotencyKey: needEventKey(needId, 'Assigned', 'human-confirm'),
+      now: assignedAt,
+    },
+  );
+  const committed = humanAssign.status === 'applied';
+  await a.volunteerStore.incrementLoad(volId, 1);
+
+  // (4) It drifts on the SAME projection flags a human promise uses (on time before due, drifting after).
+  const dueMs = Date.parse(slaIso);
+  const onTime = await a.service.getNeed(needId, dueMs - 60_000);
+  const overdue = await a.service.getNeed(needId, dueMs + 60_000);
+  const driftsLikeHuman =
+    onTime?.flags.is_drifting === false &&
+    overdue?.state === 'CLAIMED' &&
+    overdue?.assigned_volunteer_id === volId &&
+    overdue?.flags.is_drifting === true;
+
+  // (5) Closes only on a complete EVIDENCE packet — the identical gate a human obligation faces.
+  let clock = dueMs + 120_000;
+  const at = (): string => {
+    const v = new Date(clock).toISOString();
+    clock += 1000;
+    return v;
+  };
+  await a.service.dispatch(
+    needId,
+    { type: 'EvidenceAttached', payload: { kind: 'photo', evidence_id: 'F_PLEDGE', meta: { via: 'demo' } } },
+    {
+      actor: { type: 'agent', id: volId },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'EvidenceAttached', 'photo'),
+    },
+  );
+  await a.service.dispatch(
+    needId,
+    { type: 'EvidenceAttached', payload: { kind: 'locality_confirm', meta: { via: 'demo' } } },
+    {
+      actor: { type: 'agent', id: volId },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'EvidenceAttached', 'locality'),
+    },
+  );
+  // Premature Verified (human) → rejected for insufficient evidence, exactly as for a human obligation.
+  const premature = await a.service.dispatch(
+    needId,
+    { type: 'Verified', payload: {} },
+    {
+      actor: { type: 'human', id: coordinator },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'Verified', 'premature'),
+    },
+  );
+  const rejectedEarly = premature.status === 'rejected' && premature.code === 'INSUFFICIENT_EVIDENCE';
+  await a.service.dispatch(
+    needId,
+    { type: 'RecipientConfirmed', payload: { confirmed_by: 'recipient' } },
+    {
+      actor: { type: 'agent', id: 'demo-recipient' },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'RecipientConfirmed', 'pledge'),
+    },
+  );
+  await a.service.dispatch(
+    needId,
+    { type: 'EvidenceAttached', payload: { kind: 'recipient_confirm', meta: { via: 'demo' } } },
+    {
+      actor: { type: 'agent', id: 'demo-recipient' },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'EvidenceAttached', 'recipient'),
+    },
+  );
+  await a.service.dispatch(
+    needId,
+    { type: 'EvidenceAttached', payload: { kind: 'coordinator_signoff', meta: { via: 'demo' } } },
+    {
+      actor: { type: 'agent', id: 'relay-evidence' },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'EvidenceAttached', 'signoff'),
+    },
+  );
+  await a.service.dispatch(
+    needId,
+    { type: 'CoordinatorSignedOff', payload: {} },
+    {
+      actor: { type: 'human', id: coordinator },
+      at: at(),
+      idempotencyKey: needEventKey(needId, 'CoordinatorSignedOff', 'pledge'),
+    },
+  );
+  const verified = await a.service.dispatch(
+    needId,
+    { type: 'Verified', payload: {} },
+    { actor: { type: 'human', id: coordinator }, at: at(), idempotencyKey: needEventKey(needId, 'Verified', 'final') },
+  );
+  const closed = await a.service.dispatch(
+    needId,
+    { type: 'Closed', payload: {} },
+    { actor: { type: 'human', id: coordinator }, at: at(), idempotencyKey: needEventKey(needId, 'Closed', 'final') },
+  );
+
+  const finalNeed = await a.service.getNeed(needId);
+  const events = await a.service.getEvents(needId);
+  const gateViolations = events.filter((e) => HUMAN_GATED_TYPES.has(e.type) && e.actor.type !== 'human');
+  const closedOnEvidence =
+    verified.status === 'applied' && closed.status === 'applied' && finalNeed?.state === 'CLOSED';
+  const humanGatedCount = events.filter((e) => HUMAN_GATED_TYPES.has(e.type)).length;
+
+  const pass =
+    toolBody.status === 'pledge_filed' &&
+    proposalIsAgent &&
+    notAutoClaimed &&
+    agentRegistered &&
+    gateHeld &&
+    committed &&
+    driftsLikeHuman &&
+    rejectedEarly &&
+    closedOnEvidence &&
+    gateViolations.length === 0;
+  results.push({
+    capability: 'agent_pledge',
+    assert: 'pledge_requires_human_confirm',
+    pass,
+    detail: pass
+      ? `agent pledge on ${publicId} filed as an agent PROPOSAL (not auto-claimed); agent self-assign rejected at the human gate; a human Assign committed it to the agent volunteer, which then drifted past SLA and closed only on a complete evidence packet — exactly like a human promise (premature Verified rejected; all ${humanGatedCount} human-gated steps human-signed)`
+      : `toolStatus=${toolBody.status}, proposalIsAgent=${proposalIsAgent}, notAutoClaimed=${notAutoClaimed}, agentRegistered=${agentRegistered}, gateHeld=${gateHeld}, committed=${committed}, drifts=${driftsLikeHuman}, rejectedEarly=${rejectedEarly}, closedOnEvidence=${closedOnEvidence}, gateViolations=${gateViolations.map((e) => e.type).join(',') || 'none'}`,
+  });
+  return results;
+}
+
 /** Asserts the driver evaluates today: the walking skeleton, extraction-backed triage,
  * dedupe auto-detection, the deterministic match slate, the drift/reassign hero arc, the
  * evidence/verification finale, the sitrep/report narration guarantees (F6/F7), the F8
@@ -1564,6 +1790,9 @@ const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'honest_degradation',
   'bilingual_reply_in_source_thread',
   'sla_table_config_drives_drift',
+  // Moonshot batch 2 — the agent-pledge accountability chain and the SIMULATED counterfactual.
+  'pledge_requires_human_confirm',
+  'counterfactual_beats_group_chat',
 ]);
 
 export interface SkippedExpectation {

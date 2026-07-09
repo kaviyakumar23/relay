@@ -29,6 +29,11 @@ export interface Volunteer {
   availability: Record<string, unknown>;
   active_load: number;
   is_demo: boolean;
+  /** True for a roster entry that is an AI AGENT pledger, not a human volunteer (Moonshot #2 —
+   * pledge_support registers one for the pledging agent/org). Optional so every existing seed /
+   * test row compiles unchanged; normalize() defaults it to false. A confirmed agent obligation
+   * is still tracked with the SAME SLA/drift/evidence machinery as a human's. */
+  is_agent?: boolean;
 }
 
 /** The registry seam. In-memory for tests + demo; Postgres in production. */
@@ -59,6 +64,7 @@ function normalize(v: Volunteer): Volunteer {
     capacity_per_day: v.capacity_per_day ?? 2,
     active_load: v.active_load ?? 0,
     is_demo: v.is_demo ?? false,
+    is_agent: v.is_agent ?? false,
   };
 }
 
@@ -109,10 +115,11 @@ interface VolunteerRow {
   availability: Record<string, unknown> | null;
   active_load: number;
   is_demo: boolean;
+  is_agent: boolean;
 }
 
 const SELECT_COLS =
-  'id, slack_user_id, display_name, skills, languages, home_locality, radius_km, capacity_per_day, availability, active_load, is_demo';
+  'id, slack_user_id, display_name, skills, languages, home_locality, radius_km, capacity_per_day, availability, active_load, is_demo, is_agent';
 
 /**
  * Production registry on Postgres (maps to the `volunteers` table). Same contract as
@@ -139,6 +146,7 @@ export class PgVolunteerStore implements VolunteerStore {
       availability: row.availability ?? {},
       active_load: row.active_load,
       is_demo: row.is_demo,
+      is_agent: row.is_agent,
     };
   }
 
@@ -148,13 +156,13 @@ export class PgVolunteerStore implements VolunteerStore {
     // the volunteer's accumulated load. incrementLoad is the only writer of that column.
     await this.pool.query(
       `INSERT INTO volunteers
-         (slack_user_id, display_name, skills, languages, home_locality, radius_km, capacity_per_day, availability, active_load, is_demo)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         (slack_user_id, display_name, skills, languages, home_locality, radius_km, capacity_per_day, availability, active_load, is_demo, is_agent)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        ON CONFLICT (slack_user_id) DO UPDATE SET
          display_name = excluded.display_name, skills = excluded.skills, languages = excluded.languages,
          home_locality = excluded.home_locality, radius_km = excluded.radius_km,
          capacity_per_day = excluded.capacity_per_day, availability = excluded.availability,
-         is_demo = excluded.is_demo`,
+         is_demo = excluded.is_demo, is_agent = excluded.is_agent`,
       [
         n.slack_user_id,
         n.display_name,
@@ -166,6 +174,7 @@ export class PgVolunteerStore implements VolunteerStore {
         JSON.stringify(n.availability),
         n.active_load,
         n.is_demo,
+        n.is_agent ?? false,
       ],
     );
   }

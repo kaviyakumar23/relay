@@ -17,6 +17,7 @@ export const EVENT_TYPES = [
   'DuplicateProposed',
   'DuplicateConfirmed',
   'TriageConfirmed',
+  'PledgeProposed',
   'MatchSuggested',
   'Claimed',
   'Assigned',
@@ -70,6 +71,19 @@ export interface DuplicateConfirmedPayload {
 export interface MatchSuggestedPayload {
   candidates: Array<{ volunteer_id: string; score: number }>;
 }
+/**
+ * An external AGENT (via the MCP write tool pledge_support, Moonshot #2) proposes to fulfil a
+ * need. This is a PROPOSAL, never a commitment — decide() applies it from OPEN/MATCH_SUGGESTED
+ * as a non-gated agent event, moving the need to MATCH_SUGGESTED (still awaiting a human). A
+ * coordinator then confirms via the human-gated Assigned, after which the obligation is tracked
+ * with the SAME SLA/drift/evidence machinery as any human promise. `volunteer_id` is the agent
+ * volunteer the confirm will assign; `pledged_by` is the agent/org display name (never PII).
+ */
+export interface PledgeProposedPayload {
+  volunteer_id: string;
+  pledged_by: string;
+  note?: string;
+}
 export interface AssignmentPayload {
   volunteer_id: string;
   obligation_id?: string;
@@ -93,6 +107,7 @@ export type EventBody =
   | { type: 'DuplicateProposed'; payload: DuplicateProposedPayload }
   | { type: 'DuplicateConfirmed'; payload: DuplicateConfirmedPayload }
   | { type: 'TriageConfirmed'; payload: { note?: string } }
+  | { type: 'PledgeProposed'; payload: PledgeProposedPayload }
   | { type: 'MatchSuggested'; payload: MatchSuggestedPayload }
   | { type: 'Claimed'; payload: AssignmentPayload }
   | { type: 'Assigned'; payload: AssignmentPayload }
@@ -165,6 +180,13 @@ export const payloadSchemas = {
   }),
   DuplicateConfirmed: z.object({ merged_into: z.string().min(1) }),
   TriageConfirmed: z.object({ note: z.string().optional() }),
+  // pledged_by / note are capped so the zero-copy guard (short, single-line derived fields only)
+  // can never be tripped by an agent pasting a raw body into the pledge.
+  PledgeProposed: z.object({
+    volunteer_id: z.string().min(1),
+    pledged_by: z.string().min(1).max(120),
+    note: z.string().max(280).optional(),
+  }),
   MatchSuggested: z.object({
     candidates: z.array(z.object({ volunteer_id: z.string().min(1), score: z.number() })),
   }),

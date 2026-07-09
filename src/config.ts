@@ -29,6 +29,12 @@ export const config = Object.freeze({
   contactVaultKey: env.CONTACT_VAULT_KEY ?? '',
   // Demo SLA compression (§12.3): 0.02 turns a 45-min SLA into ~54s. Labeled for judges.
   slaMultiplier: Number(env.SLA_MULTIPLIER ?? 1),
+  // The MCP server is READ-ONLY by default. The single WRITE tool (pledge_support, Moonshot #2 —
+  // an external agent pledging to fulfil a need) is OPT-IN: it only accepts input when this flag
+  // is truthy. Default false, so the hosted server and every hermetic test expose no write surface
+  // unless an operator explicitly enables it. Even when enabled, a pledge is only a PROPOSAL — a
+  // human coordinator must confirm it (the existing Assign human gate); the flag never bypasses that.
+  mcpWritesEnabled: env.RELAY_MCP_WRITES_ENABLED === '1' || env.RELAY_MCP_WRITES_ENABLED?.toLowerCase() === 'true',
 });
 
 export type Config = typeof config;

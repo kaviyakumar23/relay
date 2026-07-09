@@ -151,6 +151,9 @@ export const capabilitySchema = z.enum([
   'degrade', // "Unplug the AI" — honest heuristic degradation, no need lost.
   'requester_loop', // Language-matched progress reply into the requester's own thread.
   'second_scenario', // Same engine, different disaster: a config-only SLA regime.
+  // Moonshot batch 2.
+  'agent_pledge', // An AI agent's pledge is a PROPOSAL a human confirms — tracked identically.
+  'counterfactual', // Measured, SIMULATED delta vs a naive group-chat baseline (BASELINE-RULES.md).
 ]);
 export type Capability = z.infer<typeof capabilitySchema>;
 
@@ -180,6 +183,12 @@ export const ASSERT_CATALOG = {
   // Moonshot #5 — the scenario's `sla:` override drives a genuinely different drift deadline for
   // the same (type, severity) through the SAME computeSlaDueAtMs; nothing is recompiled.
   second_scenario: ['sla_table_config_drives_drift'],
+  // Moonshot #2 — an agent pledge lands as an agent-actor PROPOSAL (not auto-claimed); a human
+  // Assign commits it, then it is tracked with the SAME SLA/drift/evidence as a human promise.
+  agent_pledge: ['pledge_requires_human_confirm'],
+  // Moonshot #3 — the measured, clearly-SIMULATED counterfactual: the naive baseline leaves work
+  // unclaimed + double-served and verifies nothing, while Relay dedupes the known pairs and verifies.
+  counterfactual: ['counterfactual_beats_group_chat'],
 } as const satisfies Record<Capability, readonly string[]>;
 
 const countParams = z.object({ count: z.number().int().nonnegative() });
@@ -306,6 +315,22 @@ export const expectationSchema = z.discriminatedUnion('assert', [
   z.object({
     capability: z.literal('second_scenario'),
     assert: z.literal('sla_table_config_drives_drift'),
+    params: z.object({}).optional(),
+  }),
+  // agent_pledge (Moonshot #2) — an agent pledges (pledge_support) against the named OPEN need. It
+  // lands as an agent-actor PROPOSAL that is NOT auto-claimed; an agent self-assign is rejected at
+  // the human gate; a human Assign commits it to the agent volunteer, after which it drifts + closes
+  // on evidence exactly like a human promise.
+  z.object({
+    capability: z.literal('agent_pledge'),
+    assert: z.literal('pledge_requires_human_confirm'),
+    params: z.object({ need_ref: z.string().min(1) }),
+  }),
+  // counterfactual (Moonshot #3) — the SIMULATED group-chat baseline leaves work unclaimed +
+  // double-served and verifies nothing; Relay dedupes the known pairs and verifies. All measured.
+  z.object({
+    capability: z.literal('counterfactual'),
+    assert: z.literal('counterfactual_beats_group_chat'),
     params: z.object({}).optional(),
   }),
 ]);

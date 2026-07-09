@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildHermeticAssembly, injectIntake } from '../../src/demo/driver';
+import type { NeedEvent } from '../../src/ledger/events';
 import { type EvidenceKind, emptyFlags, type NeedState, type ProjectedNeed } from '../../src/ledger/types';
 import { dispatchCard } from '../../src/surfaces/needCard';
 import { parseActionId, type SlackBlock } from '../../src/surfaces/primitives';
@@ -126,6 +127,67 @@ describe('dispatchCard — pre-extraction fallback', () => {
     expect((blocks[0] as { text?: { text?: string } }).text?.text).toContain('UNCLASSIFIED');
     expect(dump).toContain('extraction pending');
     expect(dump).not.toContain('need_reveal');
+  });
+});
+
+describe('dispatchCard — agent pledge marker (Moonshot #2)', () => {
+  /** A pledged need: an agent filed a PledgeProposed, so it sits at MATCH_SUGGESTED, still awaiting
+   * a human confirm (assigned_volunteer_id null). */
+  function pledgedNeed(overrides: Partial<ProjectedNeed> = {}): ProjectedNeed {
+    return {
+      need_id: 'need_p',
+      state: 'MATCH_SUGGESTED',
+      type: 'food',
+      severity: 'high',
+      locality_id: 7,
+      location_text: 'Adyar',
+      people_count: 4,
+      languages: [],
+      source: { permalink: 'https://relay.demo/x/p7' },
+      confidence: {},
+      merged_into: null,
+      assigned_volunteer_id: null,
+      obligation_id: null,
+      sla_due_at: null,
+      evidence: [],
+      flags: emptyFlags(),
+      state_version: 3,
+      history_count: 4,
+      created_at: '2026-07-04T00:00:00.000Z',
+      updated_at: '2026-07-04T00:05:00.000Z',
+      ...overrides,
+    };
+  }
+
+  const pledgeEvent = (pledgedBy: string): NeedEvent =>
+    ({
+      event_id: 'evt_pledge',
+      need_id: 'need_p',
+      at: '2026-07-04T00:05:00.000Z',
+      actor: { type: 'agent', id: `agent:${pledgedBy}` },
+      idempotency_key: 'k_pledge',
+      type: 'PledgeProposed',
+      payload: { volunteer_id: `agent:${pledgedBy}`, pledged_by: pledgedBy },
+    }) as NeedEvent;
+
+  it('renders "🤖 Pledged via MCP by <agent> — confirm to track it" for an un-confirmed pledge', () => {
+    const blocks = dispatchCard('N-0007', pledgedNeed(), { events: [pledgeEvent('Chennai Food Bank agent')] });
+    const dump = jsonOf(blocks);
+    expect(dump).toContain('🤖');
+    expect(dump).toContain('Pledged via MCP by Chennai Food Bank agent');
+    expect(dump).toContain('Confirm to track it');
+    // The pre-commit Confirm/Assign row is still offered, so a coordinator can confirm from the card.
+    const actionIds = blocks
+      .filter((b) => (b as { type?: string }).type === 'actions')
+      .flatMap((b) => (b as { elements: Array<{ action_id: string }> }).elements)
+      .map((el) => parseActionId(el.action_id).action);
+    expect(actionIds).toContain('need_assign');
+  });
+
+  it('hides the pledge marker once a human has confirmed (a volunteer is assigned)', () => {
+    const confirmed = pledgedNeed({ state: 'CLAIMED', assigned_volunteer_id: 'agent:chennai-food-bank-agent' });
+    const dump = jsonOf(dispatchCard('N-0007', confirmed, { events: [pledgeEvent('Chennai Food Bank agent')] }));
+    expect(dump).not.toContain('Pledged via MCP by');
   });
 });
 

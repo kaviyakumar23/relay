@@ -318,3 +318,20 @@ expectations:
   - capability: requester_loop
     assert: bilingual_reply_in_source_thread
     params: { need_ref: m01 }
+
+  # agent_pledge (Moonshot #2 — "Relay holds AI agents accountable too") — an external agent pledges
+  # to fulfil the Saidapet cooked-food need m09 via pledge_support. It lands as an AGENT-actor
+  # PROPOSAL (not auto-claimed); an agent self-assign is rejected at the human gate; a human Assign
+  # commits it to the agent volunteer, and it then drifts past SLA + closes on a complete evidence
+  # packet exactly like a human promise — one path, no shortcut for the agent.
+  - capability: agent_pledge
+    assert: pledge_requires_human_confirm
+    params: { need_ref: m09 }
+
+  # counterfactual (Moonshot #3) — the measured, clearly-SIMULATED delta vs a naive group-chat
+  # baseline (published rules: docs/BASELINE-RULES.md). The baseline leaves work unclaimed +
+  # double-served and verifies nothing; Relay dedupes the known duplicate pairs and verifies. Every
+  # number comes from actually running both simulators — never fabricated, never a claim about a real
+  # deployment. Also runnable standalone via `npm run counterfactual`.
+  - capability: counterfactual
+    assert: counterfactual_beats_group_chat

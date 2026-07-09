@@ -2,6 +2,7 @@ import type { NeedEvent } from '../ledger/events';
 import type { ConfidenceStatus, ProjectedNeed } from '../ledger/types';
 import { buildSignoffControls, MARK_DELIVERED_ACTION } from './evidenceModal';
 import { buildEvidencePacket } from './evidencePacket';
+import { ASSIGN_PICK_ACTION, encodeAssignTarget } from './matchCard';
 import {
   ACTIONS,
   actions,
@@ -214,6 +215,44 @@ function confidenceBlocks(need: ProjectedNeed): SlackBlock[] {
   return [context(`Confidence:  ${parts.join('  ·  ')}`), context('_✓ stated · ~ inferred · ? unknown_')];
 }
 
+/**
+ * Marker + confirm control for an agent pledge (Moonshot #2). When an external agent has filed a
+ * PledgeProposed via the MCP write tool and the need is NOT yet committed to a volunteer, the card
+ * flags it so a coordinator knows to confirm: "🤖 Pledged via MCP by <agent> — confirm to track it."
+ * The "✅ Confirm pledge" button routes through the EXISTING human-gated Assign flow
+ * (ASSIGN_PICK_ACTION → need_assign_pick → Assigned → CLAIMED), committing the obligation to the
+ * AGENT volunteer named in the pledge — so once a human confirms it is tracked with the identical
+ * SLA / drift / evidence machinery as any human promise (the whole point: Relay holds AI agents
+ * accountable too). Once confirmed (a volunteer is assigned) the marker naturally disappears.
+ * Rendered from the event log (like the duplicate banner) — no projection change — and deduped by
+ * the agent volunteer id.
+ */
+function pledgeBanners(need: ProjectedNeed, opts: DispatchCardOptions): SlackBlock[] {
+  if (need.assigned_volunteer_id !== null) return []; // already committed → the pledge was confirmed
+  const events = opts.events ?? [];
+  const out: SlackBlock[] = [];
+  const seen = new Set<string>();
+  for (const e of events) {
+    if (e.type !== 'PledgeProposed') continue;
+    const by = e.payload.pledged_by;
+    const volunteerId = e.payload.volunteer_id;
+    if (by === '' || volunteerId === '' || seen.has(volunteerId)) continue;
+    seen.add(volunteerId);
+    out.push(
+      section(
+        `🤖 *Pledged via MCP by ${escapeMrkdwn(by)}* — an AI agent proposed to fulfil this need. ` +
+          'Confirm to track it with the same SLA + evidence as a human promise.',
+      ),
+      // The coordinator's one click that commits the pledge — the EXISTING human-gated Assign path,
+      // targeting the agent volunteer, so an agent can never skip the human confirmation step.
+      actions([
+        button('✅ Confirm pledge', ASSIGN_PICK_ACTION, encodeAssignTarget(need.need_id, volunteerId), 'primary'),
+      ]),
+    );
+  }
+  return out;
+}
+
 /** Banner block(s) for each auto-detected duplicate (DuplicateProposed) that has not
  * yet been human-merged: a warning line naming the likely original + a Merge button. */
 function duplicateBanners(need: ProjectedNeed, opts: DispatchCardOptions): SlackBlock[] {
@@ -265,6 +304,7 @@ export function dispatchCard(publicId: string, need: ProjectedNeed, opts: Dispat
   const blocks: SlackBlock[] = [
     header(headerText(publicId, need)),
     context(`Received ${receivedLabel(need.created_at)}  ·  Status: *${need.state}*`),
+    ...pledgeBanners(need, opts),
     ...duplicateBanners(need, opts),
     divider,
     fieldsBlock(need),

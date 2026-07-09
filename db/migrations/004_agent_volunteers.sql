@@ -1,0 +1,11 @@
+-- 004_agent_volunteers.sql — mark roster rows that are AI-AGENT pledgers (Moonshot #2).
+--
+-- The MCP write tool `pledge_support` lets an external agent (e.g. a food bank's agent, via
+-- Claude Desktop) pledge to fulfil a need. That pledge registers an is_agent volunteer for the
+-- pledging agent/org and records an AGENT-actor PledgeProposed event — a PROPOSAL, never an
+-- auto-commit. A human coordinator then confirms it through the SAME Assign flow as any human
+-- volunteer, after which the obligation is tracked with the SAME SLA / drift / evidence machinery.
+-- This flag simply distinguishes an agent pledger from a human volunteer on the roster.
+--
+-- Backwards-compatible: defaults false, so every existing volunteer row is a human volunteer.
+alter table volunteers add column if not exists is_agent boolean not null default false;

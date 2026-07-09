@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs';
 import { parseScenario, type Scenario } from '../../demo/scenarios/schema';
+import { evaluateCounterfactual } from './counterfactual';
 import {
   buildHermeticAssembly,
   type ExpectationResult,
+  evaluateAgentPledge,
   evaluateAssistant,
   evaluateDedupe,
   evaluateDegrade,
@@ -70,6 +72,11 @@ async function evaluateScenario(scenario: Scenario): Promise<ExpectationResult[]
     ...(await evaluateDegrade(scenario)),
     ...(await evaluateRequester(scenario, assembly, run)),
     ...(await evaluateSecondScenario(scenario, assembly)),
+    // Moonshot batch 2: the agent-pledge accountability chain (own fresh assembly) and the measured,
+    // SIMULATED counterfactual vs a naive group-chat baseline. Both no-op when the scenario carries
+    // no such expectation (heatwave-1).
+    ...(await evaluateAgentPledge(scenario)),
+    ...(await evaluateCounterfactual(scenario)),
   ];
 }
 

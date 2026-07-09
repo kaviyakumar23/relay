@@ -3,6 +3,7 @@ import type { NeedState, NeedType, ProjectedNeed, Severity } from '../ledger/typ
 import { computeSitrepStats, type SitrepStats } from '../narrate/aggregate';
 import { scrubText } from '../narrate/redaction';
 import { verificationStatus } from '../surfaces/verification';
+import { createPledgeTool, type PledgeDispatch, type PledgeVolunteerPort } from './pledge';
 
 // Pure, transport-agnostic implementations of Relay's read-only MCP tools (P1 — the MCP
 // qualifying technology). An external agent (Claude Desktop, an Agentforce agent) queries
@@ -89,6 +90,19 @@ export type GetNeedArgs = z.infer<typeof GetNeedInput>;
 export const GetSitrepInput = z.object({});
 export type GetSitrepArgs = z.infer<typeof GetSitrepInput>;
 
+/** pledge_support (Moonshot #2 — the ONE write tool). An external agent pledges to fulfil a need;
+ * it lands as an AGENT-actor PROPOSAL a human must confirm. See pledge.ts for the ledger logic. */
+export const PledgeSupportInput = z.object({
+  need_public_id: z.string().min(1).describe('The public id of the need to pledge for, e.g. "N-0007".'),
+  pledged_by: z
+    .string()
+    .min(1)
+    .max(120)
+    .describe('The name of the pledging agent or organisation (e.g. "Chennai Food Bank agent"). Not beneficiary PII.'),
+  note: z.string().max(280).optional().describe('Optional short context for the pledge (e.g. capacity or ETA).'),
+});
+export type PledgeSupportArgs = z.infer<typeof PledgeSupportInput>;
+
 // --- Dependencies -----------------------------------------------------------
 
 /** The narrow read-only slice of the ledger the tools need. NeedService satisfies
@@ -102,12 +116,28 @@ export interface NeedReadPort {
 /** Computes the live sitrep stats. Defaults to computeSitrepStats over the read port. */
 export type SitrepFn = (now: number) => SitrepStats | Promise<SitrepStats>;
 
+/** The OPT-IN write surface (Moonshot #2). Present only when the integrator composes it (stdio.ts /
+ * the HTTP mount); `enabled` mirrors config.mcpWritesEnabled. When this is absent — or enabled is
+ * false — pledge_support is registered but inert, returning a clear "writes disabled" result. */
+export interface WriteDeps {
+  /** NeedService.dispatch — appends the PledgeProposed event. */
+  dispatch: PledgeDispatch;
+  /** The volunteer registry (to register / look up the agent volunteer). */
+  volunteers: PledgeVolunteerPort;
+  /** The opt-in flag (config.mcpWritesEnabled). */
+  enabled: boolean;
+  /** Flag the registered agent volunteer as demo data (so demo reset can purge it). */
+  isDemo?: boolean;
+}
+
 export interface RelayToolDeps {
   service: NeedReadPort;
   /** Override the sitrep computation (defaults to computeSitrepStats over `service`). */
   sitrep?: SitrepFn;
   /** Reference clock for drift flags / "today". Defaults to Date.now(). */
   now?: () => number;
+  /** OPT-IN write surface for pledge_support. Omit for a pure read-only server. */
+  write?: WriteDeps;
 }
 
 // --- Tool result shape (a subset of the MCP CallToolResult) ------------------
@@ -209,13 +239,36 @@ export interface RelayTools {
   search_needs(args: SearchNeedsArgs): Promise<ToolResult>;
   get_need(args: GetNeedArgs): Promise<ToolResult>;
   get_sitrep(args: GetSitrepArgs): Promise<ToolResult>;
+  /** Moonshot #2 — the ONE write tool. Files an agent pledge as a PROPOSAL a human must confirm.
+   * Inert (returns a "writes disabled" result) unless `deps.write` is present with enabled: true. */
+  pledge_support(args: PledgeSupportArgs): Promise<ToolResult>;
 }
+
+/** An inert volunteer port used only when the write surface is absent — pledge_support returns the
+ * "writes disabled" result before it is ever consulted, so these are never actually called. */
+const NO_VOLUNTEERS: PledgeVolunteerPort = {
+  getBySlackUser: async () => null,
+  upsert: async () => {},
+};
 
 /** Bind the three read-only tools to their dependencies. Returns plain async functions —
  * call them directly in tests, or register them on an McpServer (see server.ts). */
 export function createRelayTools(deps: RelayToolDeps): RelayTools {
   const nowOf = deps.now ?? ((): number => Date.now());
   const sitrepOf: SitrepFn = deps.sitrep ?? (async (now) => computeSitrepStats(await deps.service.listNeeds(now), now));
+
+  // The write tool composes the read port (listNeeds/getPublicId) with the injected write surface.
+  // When no write surface is composed, `enabled: false` makes pledge_support inert (writes-disabled)
+  // before dispatch/volunteers are ever touched — so the inert fallbacks below are never reached.
+  const pledge = createPledgeTool({
+    listNeeds: (now) => deps.service.listNeeds(now),
+    getPublicId: (needId) => deps.service.getPublicId(needId),
+    dispatch: deps.write?.dispatch ?? (async () => ({ status: 'rejected', reason: 'no write surface configured' })),
+    volunteers: deps.write?.volunteers ?? NO_VOLUNTEERS,
+    enabled: deps.write?.enabled ?? false,
+    now: nowOf,
+    isDemo: deps.write?.isDemo,
+  });
 
   return {
     async search_needs(args) {
@@ -248,6 +301,8 @@ export function createRelayTools(deps: RelayToolDeps): RelayTools {
       const stats = await sitrepOf(now);
       return jsonResult(stats);
     },
+
+    pledge_support: pledge,
   };
 }
 
@@ -274,5 +329,12 @@ export const RELAY_TOOL_INFO = {
     description:
       'The live situation report as structured JSON: counts of active / open / critical / drifting / verified needs plus breakdowns by type, severity and status. Numbers only, computed directly from the event ledger.',
     inputSchema: GetSitrepInput,
+  },
+  pledge_support: {
+    name: 'pledge_support',
+    title: 'Pledge to fulfil a need',
+    description:
+      'Pledge that your agent/organisation will fulfil an OPEN need (by public id). The pledge lands as a PROPOSAL that a Relay coordinator must confirm — it is never auto-assigned. Once a human confirms, the commitment is tracked with the same SLA, drift detection and evidence-gated verification as any human volunteer. Requires MCP writes to be enabled on the server; otherwise it returns a clear "writes disabled" message. Never include beneficiary contact details.',
+    inputSchema: PledgeSupportInput,
   },
 } as const;
