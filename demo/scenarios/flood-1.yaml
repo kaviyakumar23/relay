@@ -306,3 +306,15 @@ expectations:
   # and the config panel (verification policy + SLA table).
   - capability: live_hero
     assert: app_home_board
+
+  # degrade (Moonshot #1 — "Unplug the AI") — the flood is driven once AI-online and once with the
+  # degrade toggle ON. Honest degradation: no need is lost either way, degraded routes AT LEAST as
+  # many to NEEDS_REVIEW as AI-online, and the seam ignores a present LLM when degraded.
+  - capability: degrade
+    assert: honest_degradation
+
+  # requester_loop (Moonshot #4) — the Tamil need m01 gets a bilingual progress reply threaded back
+  # into the requester's OWN source message (Tamil then English, public id only, no PII).
+  - capability: requester_loop
+    assert: bilingual_reply_in_source_thread
+    params: { need_ref: m01 }

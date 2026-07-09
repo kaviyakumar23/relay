@@ -1,0 +1,277 @@
+# heatwave-1 — "Same engine, different disaster, nothing recompiled" (Moonshot #5).
+#
+# A fictional severe heatwave in the same coastal city the flood scenario used. This is
+# the PROOF that Relay's engine is config/data-driven: heatwave-1 runs the SAME intake →
+# triage → match → drift → verify pipeline as flood-1 — no domain logic is forked. The
+# only things that change are DATA:
+#   · different need types dominate (water / medical / shelter / transport / other — no
+#     rescue/boat work; heat, not floodwater), and
+#   · a scenario-owned `sla:` block: in a heatwave dehydration + heatstroke turn lethal
+#     FASTER than in a flood, so medical/water criticals get shorter budgets than the
+#     engine default (DEFAULT_SLA_TABLE). The engine's computeSlaDueAtMs reads this table;
+#     nothing is recompiled. (See src/drift/slaConfig.ts + tests/drift/slaConfig.test.ts.)
+#
+# Fired by the injector as the labelled "Relay Simulator 🧪" identity (CLAUDE.md rule 10).
+# ALL data is fictional: invented Tamil personas, obviously-fake 98400 1xxxx phone strings,
+# real place names on the fictional seed grid (seed/localities.json).
+#
+# Composition of the 12 intake messages:
+#   · 2 Tamil-English code-mix (h01, h04)              language: ta-en
+#   · 1 exact-contact duplicate (h06 = h02)            same phone, new persona → auto-link
+#   · 1 fuzzy duplicate (h11 of h01)                   reworded, NO contact → human-merge card
+#   · 1 garbled low-confidence (h12)                   no type/locality/count → NEEDS_REVIEW
+#   · 7 clear messages spanning water / medical / shelter / transport / other, incl.
+#     h02 (elderly collapsed & unconscious) + h03 (infant high fever) → critical floors.
+# 10 distinct incidents remain once the 2 duplicates resolve.
+#
+# SLAs compressed 50x so drift fires on camera. The composition/consistency of these counts
+# is verified against the real HeuristicExtractor in tests/drift/slaConfig.test.ts.
+
+id: heatwave-1
+title: 44°C and climbing — Bay Relief Collective heatwave response
+sla_multiplier: 0.02
+
+# Per-scenario SLA overrides (Moonshot #5). Only the cells that differ from the engine
+# default; everything else falls back to DEFAULT_SLA_TABLE via mergeSlaTable.
+#   medical/critical  45 → 30 min  · heatstroke collapse is faster than a flood rescue
+#   medical/high      90 → 60 min
+#   water/critical    60 → 40 min  · dehydration in 44°C is time-critical
+#   water/high       120 → 90 min
+sla:
+  medical:
+    critical: 30
+    high: 60
+  water:
+    critical: 40
+    high: 90
+
+steps:
+  # --- Intake heat wave ---------------------------------------------------
+  - kind: intake_message
+    id: h01
+    persona: Selvi M.
+    language: ta-en
+    delay_ms: 0
+    contact: "98400 10110"
+    text: >-
+      Velachery Vijaya nagar la overhead tank rendu naala fully kaali, water
+      tanker varala, veyil romba jaasti, kudikka thanni-ku romba kashtam.
+      Drinking water urgent-a venum. Number 98400 10110.
+
+  - kind: intake_message
+    id: h02
+    persona: Ravi Kumar
+    language: en
+    delay_ms: 2600
+    contact: "98400 11123"
+    text: >-
+      Urgent - an elderly diabetic patient near Taramani MRTS station has
+      collapsed and is unconscious in the heat, breathing but very weak. We
+      need medical help immediately. Contact 98400 11123.
+
+  - kind: intake_message
+    id: h03
+    persona: Anjali S.
+    language: en
+    delay_ms: 3200
+    contact: "98400 12245"
+    text: >-
+      A six month old infant in Pallikaranai has very high fever and heat
+      rash and is not feeding, the family cannot reach a doctor. Please send
+      medical help. 98400 12245.
+
+  - kind: intake_message
+    id: h04
+    persona: Bala V.
+    language: ta-en
+    delay_ms: 1900
+    text: >-
+      Madipakkam la taps rendu naala fully dry, 20-25 veedu iruku, vayasana
+      ammakkellam kudikka thanni venum. Water tanker anuppa mudiyuma?
+
+  - kind: intake_message
+    id: h05
+    persona: Nithya R.
+    language: en
+    delay_ms: 3700
+    contact: "98400 13310"
+    text: >-
+      About 15 people from tin-roof homes in Perungudi, including a few
+      elderly, need a cool place to stay through the worst afternoon heat.
+      Any cooling shelter space? 98400 13310.
+
+  - kind: intake_message
+    id: h06
+    persona: Ganesh (neighbour)
+    language: en
+    delay_ms: 2400
+    contact: "98400 11123"
+    text: >-
+      Following up on the elderly diabetic patient who collapsed near
+      Taramani MRTS - still no medical team has come and he is barely
+      responsive in this heat. Same number 98400 11123.
+
+  - kind: intake_message
+    id: h07
+    persona: Shanthi P.
+    language: en
+    delay_ms: 4200
+    contact: "98400 14407"
+    text: >-
+      Need a vehicle to move an elderly couple from Adyar to their relative's
+      air-conditioned home, the husband is very weak and cannot cope with the
+      heat. 98400 14407.
+
+  - kind: intake_message
+    id: h08
+    persona: Murugan T.
+    language: en
+    delay_ms: 1700
+    contact: "98400 15580"
+    text: >-
+      Urgent - a day shelter for outdoor construction workers in Guindy has
+      run out of ORS and basic medicine for dehydration and heat exhaustion,
+      several are dizzy and cramping. 98400 15580.
+
+  - kind: intake_message
+    id: h09
+    persona: Vasanth
+    language: en
+    delay_ms: 3400
+    contact: "98400 16691"
+    text: >-
+      Elderly residents in Kodambakkam have had no drinking water for two
+      days, the taps are completely dry and it is over 44 degrees outside. We
+      need water cans. 98400 16691.
+
+  - kind: intake_message
+    id: h10
+    persona: Prakash D.
+    language: en
+    delay_ms: 4000
+    contact: "98400 17712"
+    text: >-
+      An old-age home in Anna Nagar has had a power cut for hours in this
+      heat and needs a generator and fans for the residents. 98400 17712.
+
+  - kind: intake_message
+    id: h11
+    persona: Kumar (passerby)
+    language: en
+    delay_ms: 1500
+    text: >-
+      Heard the top-floor flats in Velachery still have no water in this heat
+      - the overhead tank has been empty for two days and people badly need
+      drinking water.
+
+  - kind: intake_message
+    id: h12
+    persona: unknown caller
+    language: en
+    delay_ms: 4400
+    text: >-
+      pls hlp so hot here cant cope since mrng ... feeling faint ... signal
+      weak phone abt to die cant type prop
+
+  # --- Volunteer actions (drive match + the hero drift->reassign) ---------
+  # Priya (Velachery) self-claims the Velachery water need h01...
+  - kind: volunteer_claim
+    volunteer_ref: SEED_U03
+    need_ref: h01
+    delay_ms: 3000
+  # ...Anitha (paramedic, Taramani) claims the critical heatstroke need h02.
+  - kind: volunteer_claim
+    volunteer_ref: SEED_U01
+    need_ref: h02
+    delay_ms: 2200
+  # Priya gets stuck and releases h01 -> drift reassigns to another volunteer.
+  # This is the hero moment — identical shape to flood-1, on the same engine.
+  - kind: volunteer_reply
+    volunteer_ref: SEED_U03
+    reply: release
+    delay_ms: 2600
+
+expectations:
+  # skeleton — one need per intake message.
+  - capability: skeleton
+    assert: needs_created_count
+    params: { count: 12 }
+
+  # triage — 12 needs minus 1 exact + 1 fuzzy duplicate = 10 distinct incidents; the
+  # garbled h12 routes to NEEDS_REVIEW; the collapsed elder + the infant floor to critical.
+  - capability: triage
+    assert: distinct_needs_after_dedupe
+    params: { count: 10 }
+  - capability: triage
+    assert: needs_review_count
+    params: { count: 1 }
+  - capability: triage
+    assert: critical_severity_floor
+    params: { need_refs: [h02, h03] }
+
+  # dedupe — the repeated phone auto-links; the reworded rooftop report (no contact) is only
+  # proposed for human merge. Pairs are [duplicate, original].
+  - capability: dedupe
+    assert: exact_contact_auto_link
+    params: { pairs: [[h06, h02]] }
+  - capability: dedupe
+    assert: duplicate_proposed_pairs
+    params: { pairs: [[h11, h01]] }
+
+  # match — the critical heatstroke need gets a full top-3 volunteer slate.
+  - capability: match
+    assert: candidates_suggested
+    params: { need_ref: h02, min_count: 3 }
+
+  # drift — the Velachery water obligation (h01) nudges before its (compressed) SLA, and
+  # reassigns once Priya releases it.
+  - capability: drift
+    assert: nudge_before_overdue
+    params: { need_ref: h01 }
+  - capability: drift
+    assert: reassign_after_release
+    params: { need_ref: h01 }
+
+  # evidence — closing h01 is blocked until the full high-severity packet is present, and the
+  # SECOND volunteer (post-reassign) delivers photo + locality, a premature Verified is REJECTED,
+  # then recipient confirm + coordinator sign-off complete the packet → Verified → Closed.
+  - capability: evidence
+    assert: close_requires_evidence
+    params:
+      need_ref: h01
+      required: [photo, locality_confirm, recipient_confirm, coordinator_signoff]
+  - capability: evidence
+    assert: hero_e2e
+    params:
+      need_ref: h01
+
+  # sitrep — every {{stat:*}} token in the narrative must equal the SQL truth.
+  - capability: sitrep
+    assert: stats_match_ledger
+
+  # report — a hallucinated figure is rejected and the output falls back to the template.
+  - capability: report
+    assert: integrity_guard
+  # report — the generated report Markdown is PII-clean.
+  - capability: report
+    assert: no_pii
+
+  # judge (F8) — the injector plays all 12 intake messages under the 🧪 "Relay Simulator".
+  - capability: judge
+    assert: injector_posts_as_simulator
+    params: { count: 12 }
+  # judge (F8) — the demo reset is idempotent.
+  - capability: judge
+    assert: reset_idempotent
+
+  # requester_loop (Moonshot #4) — the Tamil need h01 gets a bilingual progress reply threaded back
+  # into the requester's OWN source message (same engine, same seam as flood-1).
+  - capability: requester_loop
+    assert: bilingual_reply_in_source_thread
+    params: { need_ref: h01 }
+
+  # second_scenario (Moonshot #5) — the SAME engine, driven by this scenario's `sla:` override:
+  # medical/water criticals get genuinely earlier drift deadlines than the default table, proving
+  # config (not code) drives the SLA regime — nothing is recompiled.
+  - capability: second_scenario
+    assert: sla_table_config_drives_drift

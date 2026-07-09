@@ -52,8 +52,10 @@ export interface Notifier {
   postDirect(userId: string, text: string, blocks: SlackBlock[]): Promise<CardRef>;
   /** Post an arbitrary block message to #relay-dispatch (e.g. a reassignment card). */
   postToDispatch(text: string, blocks: SlackBlock[]): Promise<CardRef>;
-  /** Post an arbitrary block message to a specific channel (e.g. a sitrep/report to #relay-hq). */
-  postToChannel(channel: string, text: string, blocks: SlackBlock[]): Promise<CardRef>;
+  /** Post an arbitrary block message to a specific channel (e.g. a sitrep/report to #relay-hq).
+   * `threadTs` threads the message under an existing message (e.g. a requester-facing progress
+   * reply posted under the original intake message); omit for a top-level channel post. */
+  postToChannel(channel: string, text: string, blocks: SlackBlock[], threadTs?: string): Promise<CardRef>;
   /** Re-render any posted message in place (nudge DM / reassignment card acknowledgement). */
   updateMessage(ref: CardRef, text: string, blocks: SlackBlock[]): Promise<void>;
 }
@@ -133,8 +135,8 @@ export class SlackNotifier implements Notifier {
     return { channel: res.channel ?? channel, ts: res.ts ?? '' };
   }
 
-  async postToChannel(channel: string, text: string, blocks: SlackBlock[]): Promise<CardRef> {
-    const res = await this.client.chat.postMessage({ channel, text, blocks });
+  async postToChannel(channel: string, text: string, blocks: SlackBlock[], threadTs?: string): Promise<CardRef> {
+    const res = await this.client.chat.postMessage({ channel, text, blocks, thread_ts: threadTs });
     return { channel: res.channel ?? channel, ts: res.ts ?? '' };
   }
 
@@ -187,10 +189,12 @@ export interface RecordedPost extends CardRef {
 }
 
 /** A recorded post to a named channel (sitrep/report to #relay-hq) — its ref, target channel,
- * text + blocks. */
+ * text + blocks, and the `threadTs` it was threaded under (e.g. a requester-facing reply posted
+ * into the original intake message's thread), when one was supplied. */
 export interface RecordedChannelPost extends CardRef {
   text: string;
   blocks: SlackBlock[];
+  threadTs?: string;
 }
 
 /** A recorded in-place message update (nudge DM / reassignment card acknowledgement). */
@@ -259,9 +263,9 @@ export class RecordingNotifier implements Notifier {
     return ref;
   }
 
-  async postToChannel(channel: string, text: string, blocks: SlackBlock[]): Promise<CardRef> {
+  async postToChannel(channel: string, text: string, blocks: SlackBlock[], threadTs?: string): Promise<CardRef> {
     const ref: CardRef = { channel, ts: `ts_${this.seq++}` };
-    this.channelPosts.push({ ...ref, text, blocks });
+    this.channelPosts.push({ ...ref, text, blocks, threadTs });
     return ref;
   }
 

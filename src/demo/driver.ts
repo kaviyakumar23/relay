@@ -4,16 +4,19 @@ import { askRelay } from '../assistant/askRelay';
 import { buildDriftCallbacks } from '../drift/callbacks';
 import { runDriftSweep } from '../drift/driftEngine';
 import { InMemoryScheduler } from '../drift/scheduler/inMemoryScheduler';
-import { slaDueAtIso } from '../drift/sla';
+import { computeSlaDueAtMs, slaDueAtIso } from '../drift/sla';
+import { DEFAULT_SLA_TABLE, mergeSlaTable } from '../drift/slaConfig';
 import { MemoryDedupeStore } from '../ingest/dedupe';
 import { handleIntakeMessage, type IntakeOutcome } from '../ingest/intakeHandler';
 import { RecordingNotifier } from '../ingest/notifier';
+import { postRequesterReply } from '../ingest/requesterReply';
 import { isEvent, type NeedEvent } from '../ledger/events';
 import { needEventKey } from '../ledger/idempotency';
 import { NeedService } from '../ledger/needService';
 import { DEFAULT_RISK_WINDOW_MS } from '../ledger/projection';
 import { meetsVerificationPolicy } from '../ledger/stateMachine';
 import { InMemoryEventStore } from '../ledger/store/memoryStore';
+import type { NeedType, Severity } from '../ledger/types';
 import { type Actor, type NeedState, type ProjectedNeed, TERMINAL_STATES } from '../ledger/types';
 import { InMemoryContactVault } from '../lib/vault';
 import { MockLlm } from '../llm/mock';
@@ -33,6 +36,7 @@ import { makeIntakeJobHandler } from '../pipeline/intakeJob';
 import { InlineQueue } from '../pipeline/queue';
 import { appHomeView } from '../surfaces/appHome';
 import { buildMatchBlocks, type MatchNeed, type RankedCandidate } from '../surfaces/matchCard';
+import { selectExtractor, setDegrade } from './degradeMode';
 import { runFloodInjector, SIMULATOR_MARK } from './injector';
 import { HERO_BEATS, type LiveHeroDemoDeps, runLiveHeroDemo } from './liveOrchestrator';
 import { InMemoryDemoResetStore, resetDemo } from './reset';
@@ -67,7 +71,7 @@ export interface HermeticAssembly {
  * needs get ordered, reproducible timestamps. Extraction runs through the
  * deterministic HeuristicExtractor and contacts vault to an in-memory encrypted
  * store — the whole assembly needs zero env (no API key, no DB, no vault key). */
-export function buildHermeticAssembly(opts: { baseClockMs?: number } = {}): HermeticAssembly {
+export function buildHermeticAssembly(opts: { baseClockMs?: number; degradeAware?: boolean } = {}): HermeticAssembly {
   const base = opts.baseClockMs ?? BASE_CLOCK_MS;
   const store = new InMemoryEventStore();
   const service = new NeedService(store, () => base);
@@ -89,8 +93,19 @@ export function buildHermeticAssembly(opts: { baseClockMs?: number } = {}): Herm
 
   // `store` is threaded in so dedupe runs after extraction (exact-contact + fuzzy
   // DuplicateProposed). No contactHashKey → the fixed dev salt (deterministic).
+  // degradeAware: omit the pinned extractor so the intake worker chooses it PER JOB via
+  // selectExtractor (honouring the /relay demo degrade toggle). With no llm hermetically, that is
+  // the SAME HeuristicExtractor either way — the honest hermetic truth, no faked AI/degraded gap.
   const queue = new InlineQueue(
-    makeIntakeJobHandler({ service, notifier, extractor, vault, store, now, isDemo: true }),
+    makeIntakeJobHandler({
+      service,
+      notifier,
+      ...(opts.degradeAware ? {} : { extractor }),
+      vault,
+      store,
+      now,
+      isDemo: true,
+    }),
   );
   const isIntakeChannel = (channelId: string): boolean => channelId === DEMO_INTAKE_CHANNEL;
 
@@ -1316,10 +1331,214 @@ export async function evaluateLiveHero(scenario: Scenario): Promise<ExpectationR
   return results;
 }
 
+/**
+ * Evaluate Moonshot #1 — "Unplug the AI" (honest degradation). Drives the flood twice through the
+ * REAL intake pipeline on fresh degrade-aware assemblies — once AI-online, once with the degrade
+ * toggle ON — and proves the degradation is HONEST, never faked:
+ *   · no message is lost either way (every intake still creates a need + a dispatch card),
+ *   · the degraded run routes AT LEAST as many needs to NEEDS_REVIEW as AI-online (never fewer),
+ *   · at the seam, an LLM present is IGNORED when degraded (HeuristicExtractor) yet used when
+ *     online (LlmExtractor) — the toggle genuinely swaps the extractor class.
+ * Hermetically there is no real LLM, so AI-online and degraded both run the heuristic and the
+ * NEEDS_REVIEW counts are EQUAL — the honest hermetic truth (the strict gap only appears live with
+ * a real model; equalising is never faked into a gap). The toggle is reset to online on return.
+ */
+export async function evaluateDegrade(scenario: Scenario): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const exp = scenario.expectations.find((e) => e.assert === 'honest_degradation');
+  if (exp === undefined) return results;
+
+  const intakeCount = scenario.steps.filter((s) => s.kind === 'intake_message').length;
+
+  const runOnce = async (degraded: boolean): Promise<{ created: number; cards: number; review: number }> => {
+    setDegrade(degraded);
+    try {
+      const a = buildHermeticAssembly({ degradeAware: true });
+      await runScenario(scenario, a);
+      const needs = await a.service.listNeeds();
+      return {
+        created: needs.length,
+        cards: a.notifier.cards.length,
+        review: needs.filter((n) => n.state === 'NEEDS_REVIEW').length,
+      };
+    } finally {
+      setDegrade(false);
+    }
+  };
+
+  const ai = await runOnce(false);
+  const degraded = await runOnce(true);
+
+  // Seam proof: with an LLM present, degraded IGNORES it (heuristic) while online uses it (llm:*).
+  const probe = new MockLlm(() => ({}));
+  const forcesHeuristicWhenDegraded = selectExtractor({ llm: probe, degraded: true }).name === 'heuristic';
+  const usesLlmWhenOnline = selectExtractor({ llm: probe, degraded: false }).name.startsWith('llm:');
+
+  const noLoss =
+    ai.created === intakeCount &&
+    ai.cards === intakeCount &&
+    degraded.created === intakeCount &&
+    degraded.cards === intakeCount;
+  const honest = degraded.review >= ai.review;
+  const pass = noLoss && honest && forcesHeuristicWhenDegraded && usesLlmWhenOnline;
+  results.push({
+    capability: 'degrade',
+    assert: 'honest_degradation',
+    pass,
+    detail: pass
+      ? `AI-online and degraded both created all ${intakeCount} needs (no message lost); degraded routed ${degraded.review} to NEEDS_REVIEW (≥ AI-online ${ai.review}); the seam ignores a present LLM when degraded (heuristic) and uses it when online (llm:*)`
+      : `noLoss=${noLoss} (ai ${ai.created}/${ai.cards}, degraded ${degraded.created}/${degraded.cards} of ${intakeCount}), reviewDegraded=${degraded.review} reviewAi=${ai.review}, forcesHeuristic=${forcesHeuristicWhenDegraded}, usesLlm=${usesLlmWhenOnline}`,
+  });
+  return results;
+}
+
+/** Any character in the Tamil Unicode block (U+0B80–U+0BFF). */
+const TAMIL_BLOCK = /[஀-௿]/;
+
+/**
+ * Evaluate Moonshot #4 — the requester loop. On the live hermetic ledger, drives the SAME
+ * postRequesterReply seam the Slack handlers use for a ta (Tamil code-mix) need and proves the
+ * reply is threaded back into the requester's OWN source message, bilingual and PII-safe:
+ *   · posted into need.source.channel under need.source.ts (thread_ts) — the original message,
+ *   · contains Tamil script AND English, carries the public id, and has no phone-length digit run,
+ *   · uses the assigned volunteer's real display name (first token only, via the pure builder).
+ * Reads the recorded notification back — never fabricated.
+ */
+export async function evaluateRequester(
+  scenario: Scenario,
+  a: HermeticAssembly,
+  run: ScenarioRunResult,
+): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const exp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'bilingual_reply_in_source_thread' }> =>
+      e.assert === 'bilingual_reply_in_source_thread',
+  );
+  if (exp === undefined) return results;
+
+  const fail = (detail: string): void => {
+    results.push({ capability: 'requester_loop', assert: 'bilingual_reply_in_source_thread', pass: false, detail });
+  };
+
+  const need = mapNeedsByStep(await a.service.listNeeds(), run).get(exp.params.need_ref);
+  if (need === undefined) {
+    fail(`need ${exp.params.need_ref} not found`);
+    return results;
+  }
+  if (!need.languages.some((l) => l.trim().toLowerCase() === 'ta')) {
+    fail(`need ${exp.params.need_ref} is not a Tamil need (languages=${need.languages.join('+')})`);
+    return results;
+  }
+  const publicId = (await a.store.getPublicId(need.need_id)) ?? need.need_id;
+  const vol = need.assigned_volunteer_id ? await a.volunteerStore.getBySlackUser(need.assigned_volunteer_id) : null;
+
+  const before = a.notifier.channelPosts.length;
+  const posted = await postRequesterReply({
+    notifier: a.notifier,
+    need,
+    kind: 'assigned',
+    volunteerName: vol?.display_name,
+    publicId,
+  });
+  const post = a.notifier.channelPosts[a.notifier.channelPosts.length - 1];
+  if (!posted || post === undefined || a.notifier.channelPosts.length !== before + 1) {
+    fail(`postRequesterReply did not record exactly one threaded reply (posted=${posted})`);
+    return results;
+  }
+
+  const threaded = post.channel === need.source.channel && post.threadTs === need.source.ts;
+  const bilingual = TAMIL_BLOCK.test(post.text) && /[A-Za-z]/.test(post.text);
+  const carriesId = post.text.includes(publicId);
+  const noPhone = !/\d{7,}/.test(post.text);
+  const pass = threaded && bilingual && carriesId && noPhone;
+  results.push({
+    capability: 'requester_loop',
+    assert: 'bilingual_reply_in_source_thread',
+    pass,
+    detail: pass
+      ? `bilingual 'assigned' reply for ${publicId} threaded into the requester's source message (channel ${need.source.channel}, thread ${need.source.ts}); Tamil + English, public id only, no phone digits`
+      : `posted=${posted}, threaded=${threaded}, bilingual=${bilingual}, carriesId=${carriesId}, noPhone=${noPhone}`,
+  });
+  return results;
+}
+
+/**
+ * Evaluate Moonshot #5 — "same engine, different disaster, nothing recompiled". Proves the second
+ * scenario's `sla:` OVERRIDE (config, not code) drives a genuinely different drift regime through
+ * the UNCHANGED engine:
+ *   · the pipeline created the scenario's needs (the same intake→triage path ran) and a real need
+ *     of an overridden type exists (the override applies to actual traffic, not just to a table),
+ *   · for every overridden (type, severity): the merged budget equals the scenario value, DIFFERS
+ *     from DEFAULT_SLA_TABLE, and the SAME computeSlaDueAtMs yields a genuinely different (earlier)
+ *     deadline — the honest proof it is data, not a fork,
+ *   · a cell the scenario did NOT override is byte-identical to the default (same engine defaults).
+ * A scenario with no `sla:` block (flood-1) has no such expectation, so this is a no-op there.
+ */
+export async function evaluateSecondScenario(scenario: Scenario, a: HermeticAssembly): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const exp = scenario.expectations.find((e) => e.assert === 'sla_table_config_drives_drift');
+  if (exp === undefined) return results;
+
+  const fail = (detail: string): void => {
+    results.push({ capability: 'second_scenario', assert: 'sla_table_config_drives_drift', pass: false, detail });
+  };
+
+  const overrides = scenario.sla;
+  if (overrides === undefined || Object.keys(overrides).length === 0) {
+    fail('scenario carries no `sla:` override block — nothing to prove it is config-driven');
+    return results;
+  }
+  const needs = await a.service.listNeeds();
+  const merged = mergeSlaTable(overrides);
+  const assignedAt = BASE_CLOCK_MS;
+  const m = scenario.sla_multiplier;
+
+  const proofs: string[] = [];
+  const misses: string[] = [];
+  const overriddenTypes = new Set<NeedType>();
+  for (const [typeKey, row] of Object.entries(overrides)) {
+    const type = typeKey as NeedType;
+    overriddenTypes.add(type);
+    for (const [sevKey, mins] of Object.entries(row ?? {})) {
+      const sev = sevKey as Severity;
+      const def = DEFAULT_SLA_TABLE[type][sev];
+      const mergedMin = merged[type][sev];
+      const dueDefault = computeSlaDueAtMs(type, sev, assignedAt, m, DEFAULT_SLA_TABLE);
+      const dueMerged = computeSlaDueAtMs(type, sev, assignedAt, m, merged);
+      if (mergedMin === mins && mins !== def && dueMerged !== dueDefault) {
+        proofs.push(
+          `${type}/${sev} ${def}→${mergedMin}m (deadline ${Math.round((dueDefault - dueMerged) / 1000)}s earlier)`,
+        );
+      } else {
+        misses.push(
+          `${type}/${sev}: merged=${mergedMin} scenario=${mins} default=${def} dueΔ=${dueDefault - dueMerged}`,
+        );
+      }
+    }
+  }
+
+  // A cell the scenario did NOT override must equal the default (same engine defaults untouched).
+  const untouchedOk =
+    merged.shelter.critical === DEFAULT_SLA_TABLE.shelter.critical && merged.food.low === DEFAULT_SLA_TABLE.food.low;
+  // The override must apply to REAL traffic: a need of an overridden type exists in the ledger.
+  const overriddenNeedExists = needs.some((n) => overriddenTypes.has(n.type));
+  const pass = needs.length > 0 && misses.length === 0 && proofs.length > 0 && untouchedOk && overriddenNeedExists;
+  results.push({
+    capability: 'second_scenario',
+    assert: 'sla_table_config_drives_drift',
+    pass,
+    detail: pass
+      ? `${needs.length} needs on the same engine; the scenario SLA override drives distinct deadlines [${proofs.join('; ')}] via the unchanged computeSlaDueAtMs, with defaults intact elsewhere`
+      : `needs=${needs.length}, proofs=${proofs.length}, misses=[${misses.join(', ')}], untouchedOk=${untouchedOk}, overriddenNeedExists=${overriddenNeedExists}`,
+  });
+  return results;
+}
+
 /** Asserts the driver evaluates today: the walking skeleton, extraction-backed triage,
  * dedupe auto-detection, the deterministic match slate, the drift/reassign hero arc, the
  * evidence/verification finale, the sitrep/report narration guarantees (F6/F7), the F8
- * judge experience + P1 assistant/MCP flourishes, and the live self-serve hero (§F5).
+ * judge experience + P1 assistant/MCP flourishes, the live self-serve hero (§F5), and the
+ * moonshot batch (honest degrade, the requester loop, the config-only second scenario).
  * Everything else is a documented SKIP. */
 const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'needs_created_count',
@@ -1342,6 +1561,9 @@ const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'search_needs_matches_ledger',
   'hero_live_e2e',
   'app_home_board',
+  'honest_degradation',
+  'bilingual_reply_in_source_thread',
+  'sla_table_config_drives_drift',
 ]);
 
 export interface SkippedExpectation {

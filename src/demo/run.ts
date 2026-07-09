@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
-import { parseScenario } from '../../demo/scenarios/schema';
+import { parseScenario, type Scenario } from '../../demo/scenarios/schema';
 import {
   buildHermeticAssembly,
+  type ExpectationResult,
   evaluateAssistant,
   evaluateDedupe,
+  evaluateDegrade,
   evaluateDrift,
   evaluateEvidence,
   evaluateJudge,
@@ -11,6 +13,8 @@ import {
   evaluateMatch,
   evaluateMcp,
   evaluateReport,
+  evaluateRequester,
+  evaluateSecondScenario,
   evaluateSitrep,
   evaluateSkeleton,
   evaluateTriage,
@@ -19,24 +23,24 @@ import {
 } from './driver';
 
 // `npm run demo` — the judge-runnable hermetic storyboard (BUILD-DOC §16.2/§16.3).
-// It plays flood-1.yaml through the real intake pipeline (no Slack, no infra, zero
-// env): 14 intake messages → 14 NeedCreated events → P-1 (heuristic) extraction →
-// 14 dispatch cards → triage/dedupe/match → the drift/reassign hero arc (SLA nudge →
-// overdue → release → reassignment) → the evidence finale (deliver → recipient confirm →
-// coordinator sign-off → Verified → Closed, with a pre-policy Verified proven rejected) →
-// the sitrep/report narration guarantees (F6/F7: sitrep numbers == an independent ledger
-// recount; a hallucinated figure falls back to the template; the report Markdown is PII-clean).
+// It plays BOTH frozen scenarios through the real intake pipeline (no Slack, no infra, zero
+// env) on the SAME driver — proving "same engine, nothing recompiled":
+//   · flood-1.yaml   — the signature 48-hour flood: 14 intake messages → triage/dedupe/match →
+//     the drift/reassign hero arc → the evidence finale → sitrep/report guarantees → the F8 judge
+//     experience + assistant/MCP flourishes + the live self-serve hero, plus the moonshot batch
+//     (honest AI-degradation + the language-matched requester loop).
+//   · heatwave-1.yaml — a DIFFERENT disaster on the SAME engine: only DATA changes (need mix +
+//     a scenario-owned `sla:` override), proving config, not code, drives the SLA regime.
 // Prints PASS/FAIL per evaluated expectation, SKIP (with reason) for the rest, and exits
 // non-zero on any failure. CLI: console.error only.
 
-const SCENARIO_URL = new URL('../../demo/scenarios/flood-1.yaml', import.meta.url);
+const FLOOD_URL = new URL('../../demo/scenarios/flood-1.yaml', import.meta.url);
+const HEATWAVE_URL = new URL('../../demo/scenarios/heatwave-1.yaml', import.meta.url);
 
-async function main(): Promise<number> {
-  const scenario = parseScenario(readFileSync(SCENARIO_URL, 'utf8'));
-
-  console.error(`relay demo — ${scenario.id}: ${scenario.title}`);
-  console.error('  hermetic: memory store · inline queue · memory dedupe · recording notifier · no Slack, no infra\n');
-
+/** Drive one scenario end to end through the shared hermetic driver and return every evaluated
+ * result. Missing-capability evaluators return nothing (e.g. heatwave has no assistant/mcp/live
+ * hero/degrade expectations; flood has no second-scenario/`sla:` block) — never a failure. */
+async function evaluateScenario(scenario: Scenario): Promise<ExpectationResult[]> {
   const assembly = buildHermeticAssembly();
   const run = await runScenario(scenario, assembly);
 
@@ -46,7 +50,7 @@ async function main(): Promise<number> {
   }
   console.error('');
 
-  const results = [
+  return [
     ...(await evaluateSkeleton(scenario, assembly)),
     ...(await evaluateTriage(scenario, assembly, run)),
     ...(await evaluateDedupe(scenario, assembly, run)),
@@ -61,18 +65,38 @@ async function main(): Promise<number> {
     ...(await evaluateMcp(scenario, assembly)),
     // The LIVE self-serve hero (§F5) — runLiveHeroDemo end-to-end on a fresh, isolated assembly.
     ...(await evaluateLiveHero(scenario)),
+    // Moonshot batch 1: honest degrade (own fresh assemblies), the requester loop, and the
+    // config-only second scenario (a no-op for flood, which carries no `sla:` override).
+    ...(await evaluateDegrade(scenario)),
+    ...(await evaluateRequester(scenario, assembly, run)),
+    ...(await evaluateSecondScenario(scenario, assembly)),
   ];
+}
+
+async function main(): Promise<number> {
   let failures = 0;
-  for (const r of results) {
-    if (!r.pass) failures += 1;
-    console.error(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.capability}/${r.assert}: ${r.detail}`);
-  }
-  for (const s of skippedExpectations(scenario)) {
-    console.error(`  SKIP  ${s.capability}/${s.assert}: ${s.reason}`);
+  let total = 0;
+
+  for (const url of [FLOOD_URL, HEATWAVE_URL]) {
+    const scenario = parseScenario(readFileSync(url, 'utf8'));
+    console.error(`relay demo — ${scenario.id}: ${scenario.title}`);
+    console.error(
+      '  hermetic: memory store · inline queue · memory dedupe · recording notifier · no Slack, no infra\n',
+    );
+
+    const results = await evaluateScenario(scenario);
+    for (const r of results) {
+      total += 1;
+      if (!r.pass) failures += 1;
+      console.error(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.capability}/${r.assert}: ${r.detail}`);
+    }
+    for (const s of skippedExpectations(scenario)) {
+      console.error(`  SKIP  ${s.capability}/${s.assert}: ${s.reason}`);
+    }
+    console.error('');
   }
 
-  const total = results.length;
-  console.error(`\n${total - failures}/${total} evaluated expectation(s) passed`);
+  console.error(`${total - failures}/${total} evaluated expectation(s) passed across 2 scenarios (same engine)`);
   return failures > 0 ? 1 : 0;
 }
 

@@ -5,6 +5,13 @@ import type { Scenario } from '../../demo/scenarios/schema';
 import { askRelay } from '../assistant/askRelay';
 import { RtsClient, type RtsResolver } from '../assistant/rts';
 import { createMockRts } from '../assistant/rtsMock';
+import {
+  DEGRADED_BANNER,
+  describe as degradeBanner,
+  getDegrade,
+  narrationLlmFor,
+  setDegrade,
+} from '../demo/degradeMode';
 import { compressedClockNote, type InjectorPostMessage, runFloodInjector, SIMULATOR_IDENTITY } from '../demo/injector';
 import { type LiveHeroDemoDeps, type NarrateChannel, runLiveHeroDemo } from '../demo/liveOrchestrator';
 import { type DemoResetStore, type ResetDemoResult, resetDemo } from '../demo/reset';
@@ -69,11 +76,13 @@ import {
   type SlackView,
   section,
 } from '../surfaces/primitives';
+import type { RequesterReplyKind } from '../surfaces/requesterReplies';
 import { canSignOff, EVIDENCE_KIND_LABEL } from '../surfaces/verification';
 import { buildVolunteerModal, parseVolunteerSubmission, VOLUNTEER_CALLBACK_ID } from '../surfaces/volunteerModal';
 import type { DedupeStore } from './dedupe';
 import { handleIntakeMessage } from './intakeHandler';
 import type { CardRef, Notifier } from './notifier';
+import { postRequesterReply } from './requesterReply';
 
 // The Bolt transport (ported from kept's slackApp.ts, dual-mode). It maps Slack
 // events/actions onto the intake pipeline; all real logic (dedupe, ledger gates,
@@ -420,6 +429,35 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     }
   };
 
+  // Close the loop with the person who reported the need (Moonshot #4). As a need progresses
+  // (assigned → en-route → delivered → verified) post a calm, language-matched reply back into the
+  // REQUESTER's OWN source thread. Best-effort throughout: a missing source thread or a failed
+  // fetch/post is swallowed — this is a courtesy notification, never a consequential transition.
+  const notifyRequester = async (
+    needId: string,
+    kind: RequesterReplyKind,
+    opts: { need?: ProjectedNeed | null; etaMinutes?: number | null } = {},
+  ): Promise<void> => {
+    try {
+      const need = opts.need ?? (await deps.service.getNeed(needId));
+      if (need === null || need === undefined) return;
+      const publicId = await resolvePublicId(needId);
+      const vol = need.assigned_volunteer_id
+        ? await deps.volunteerStore.getBySlackUser(need.assigned_volunteer_id)
+        : null;
+      await postRequesterReply({
+        notifier: deps.notifier,
+        need,
+        kind,
+        volunteerName: vol?.display_name,
+        etaMinutes: opts.etaMinutes,
+        publicId,
+      });
+    } catch (err) {
+      logger.debug({ err, need_id: needId, kind }, 'requester reply failed (non-fatal)');
+    }
+  };
+
   // Which posted message currently holds each need's dispatch card (channel + ts). A card is
   // first posted by the pipeline worker; from then on every handler that touches a need's card
   // records the ref it just acted on here, so a later interaction can update a need's card even
@@ -459,6 +497,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       filter: homeFilters.get(userId) ?? null,
       slaMultiplier,
       publicIdOf,
+      degraded: getDegrade().llmDisabled,
     };
     await deps.notifier.publishHome(userId, needs, opts);
   };
@@ -732,6 +771,8 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         extraBlocks: [context(`✅ *Assigned to ${escapeMrkdwn(name)}*`)],
       });
     }
+    // Tell the requester help is on the way, in their own thread + language (best-effort).
+    await notifyRequester(needId, 'assigned', { need });
     void refreshHomes(); // OPEN → CLAIMED, and a new obligation joins the drift panel
   });
 
@@ -926,6 +967,8 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       return;
     }
     await ackNudge(needId, body, 'en_route');
+    // Reassure the requester their volunteer is on the way (best-effort, their thread + language).
+    await notifyRequester(needId, 'en_route', { need: res.need });
   });
 
   // "Delayed" → Nudged{kind:'delayed'}; on the 2nd delay, auto-surface a reassignment card (a
@@ -1146,6 +1189,8 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
           `${publicId} delivery reported — confirm receipt`,
           buildRecipientConfirmPrompt(needId),
         );
+        // Let the requester know help arrived and confirmation is pending (best-effort, their thread).
+        await notifyRequester(needId, 'delivered');
       }
     } catch (err) {
       logger.error({ err, need_id: needId }, 'delivery evidence submission failed');
@@ -1288,6 +1333,8 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       },
     );
     await renderEvidenceCard(needId, body);
+    // Thank the requester and confirm their need is verified + closed (best-effort, their thread).
+    await notifyRequester(needId, 'verified');
     void refreshHomes(); // VERIFIED → CLOSED bumps the "verified in the last 24h" counter
   });
 
@@ -1313,10 +1360,31 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
   const publishJudgeWelcome = async (): Promise<void> => {
     const channel = deps.roles.judgesChannelId;
     if (channel === '') return;
+    const blocks = buildJudgeWelcome();
+    // Surface the AI-DEGRADED banner on the judge on-ramp while the LLM is unplugged (Moonshot #1),
+    // so a judge who ran "/relay demo degrade llm" always sees Relay is running on heuristics.
+    if (getDegrade().llmDisabled) {
+      blocks.splice(
+        1,
+        0,
+        section(`${DEGRADED_BANNER} — extraction is heuristic-only; ambiguous reports honestly route to NEEDS_REVIEW.`),
+      );
+    }
     try {
-      await deps.notifier.postToChannel(channel, 'Relay — judges, start here', buildJudgeWelcome());
+      await deps.notifier.postToChannel(channel, 'Relay — judges, start here', blocks);
     } catch (err) {
       logger.warn({ err }, 'judge welcome publish failed');
+    }
+  };
+
+  /** Post a labelled 🧪 note into a channel as the Relay Simulator identity (demo staging is always
+   * visibly marked — CLAUDE.md 10). Best-effort; a Slack failure never breaks the caller. */
+  const postSimulatorNote = async (channel: string, text: string): Promise<void> => {
+    if (channel === '') return;
+    try {
+      await app.client.chat.postMessage({ channel, text, username: SIMULATOR_IDENTITY, icon_emoji: ':test_tube:' });
+    } catch (err) {
+      logger.debug({ err }, 'demo: simulator note failed');
     }
   };
 
@@ -1547,7 +1615,10 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       });
       return;
     }
-    const sitrep = await generateSitrep({ service: deps.service, llm: deps.llm, now: Date.now() });
+    // Degrade honours the toggle: with the AI unplugged, narration falls back to the deterministic
+    // template (narrationLlmFor → undefined) instead of the LLM.
+    const narrateLlm = narrationLlmFor(deps.llm, getDegrade().llmDisabled);
+    const sitrep = await generateSitrep({ service: deps.service, llm: narrateLlm, now: Date.now() });
     await deps.notifier.postToChannel(channel, sitrep.text, sitrep.blocks);
     await writeCanvas(client as unknown as CanvasWriteClient, {
       channelId: channel,
@@ -1572,7 +1643,7 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     const now = Date.now();
     const report = await generateReport({
       service: deps.service,
-      llm: deps.llm,
+      llm: narrationLlmFor(deps.llm, getDegrade().llmDisabled),
       period: parseReportPeriod(arg, now),
       now,
       resolvePublicId,
@@ -1603,8 +1674,45 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
   };
 
   // /relay demo start flood-1 → play the flood into #relay-intake as the 🧪 simulator (keyboard
-  // equivalent of the judge "Run flood demo" button) · /relay demo reset → idempotent teardown.
-  const runDemoCommand = async (which: string, respond: SlashRespond, userId: string): Promise<void> => {
+  // equivalent of the judge "Run flood demo" button) · /relay demo reset → idempotent teardown ·
+  // /relay demo degrade llm|off → unplug/reconnect the AI (Moonshot #1, honest degradation).
+  const runDemoCommand = async (
+    which: string,
+    mode: string,
+    channelId: string,
+    respond: SlashRespond,
+    userId: string,
+  ): Promise<void> => {
+    if (which === 'degrade') {
+      let on: boolean;
+      if (mode === 'llm') on = true;
+      else if (mode === 'off') on = false;
+      else {
+        await respond({
+          response_type: 'ephemeral',
+          text: 'Usage: `/relay demo degrade llm` unplugs the AI (heuristic extraction + template narration) · `/relay demo degrade off` reconnects it.',
+        });
+        return;
+      }
+      setDegrade(on);
+      const banner = degradeBanner();
+      await respond({
+        response_type: 'ephemeral',
+        text: on
+          ? `${banner} — extraction is now heuristic-only and sitrep/report narration uses the deterministic template. New reports will honestly route more needs to NEEDS_REVIEW. Run \`/relay demo degrade off\` to reconnect.`
+          : `${banner} — the LLM is reconnected for extraction + narration.`,
+      });
+      // A labelled 🧪 note in-channel so judges see the AI was toggled, not just the clicker.
+      await postSimulatorNote(
+        channelId,
+        on
+          ? `🧪 ${DEGRADED_BANNER} — a judge unplugged the AI. Relay keeps running on deterministic heuristics; watch new reports route to NEEDS_REVIEW.`
+          : '🧪 AI reconnected — extraction + narration are back on the LLM.',
+      );
+      void refreshHomes(); // flip the App Home degrade banner for every open board
+      await publishJudgeWelcome(); // flip the banner on the judge on-ramp
+      return;
+    }
     if (which === 'start') {
       const scenario = deps.demoScenario;
       if (scenario === undefined || deps.roles.intakeChannelId === '') {
@@ -1631,7 +1739,10 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         : `purged ${result.purged.needs} need(s) / ${result.purged.events} event(s)`;
       await respond({ response_type: 'ephemeral', text: `↺ Demo reset — ${summary}. App Home + welcome refreshed.` });
     } else {
-      await respond({ response_type: 'ephemeral', text: 'Usage: `/relay demo start flood-1` · `/relay demo reset`.' });
+      await respond({
+        response_type: 'ephemeral',
+        text: 'Usage: `/relay demo start flood-1` · `/relay demo reset` · `/relay demo degrade llm` | `off`.',
+      });
     }
   };
 
@@ -1658,11 +1769,17 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       } else if (sub === 'report') {
         await runReport(client, respond, arg);
       } else if (sub === 'demo') {
-        await runDemoCommand(parts[1]?.toLowerCase() ?? '', respond, command.user_id);
+        await runDemoCommand(
+          parts[1]?.toLowerCase() ?? '',
+          parts[2]?.toLowerCase() ?? '',
+          command.channel_id,
+          respond,
+          command.user_id,
+        );
       } else {
         await respond({
           response_type: 'ephemeral',
-          text: 'Usage: `/relay volunteer` join/update · `/relay volunteers` roster · `/relay sitrep` live board · `/relay report [24h|7d|30d]` verified-impact report · `/relay demo start flood-1` | `reset` judge demo.',
+          text: 'Usage: `/relay volunteer` join/update · `/relay volunteers` roster · `/relay sitrep` live board · `/relay report [24h|7d|30d]` verified-impact report · `/relay demo start flood-1` | `reset` | `degrade llm`|`off` judge demo.',
         });
       }
     } catch (err) {

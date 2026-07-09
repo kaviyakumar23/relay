@@ -123,6 +123,9 @@ export interface HomeViewOptions {
   filter?: HomeFilter | null;
   slaMultiplier?: number;
   publicIdOf?: (needId: string) => string | undefined;
+  /** True while the "/relay demo degrade llm" toggle is on: render an honest AI-DEGRADED banner
+   * so the judge always sees the operations board is running on heuristics (no LLM). */
+  degraded?: boolean;
 }
 
 type LabelFn = (need: ProjectedNeed) => string;
@@ -345,13 +348,22 @@ export function appHomeView(needs: ProjectedNeed[], opts: HomeViewOptions = {}):
   const active = applyHomeFilter(needs, filter);
   const stats = homeStats(active);
 
-  const blocks: SlackBlock[] = [
-    header('Relay · operations board'),
+  const blocks: SlackBlock[] = [header('Relay · operations board')];
+  // Honest AI-DEGRADED banner (Moonshot #1): when the LLM is unplugged, say so — extraction is
+  // heuristic-only and more reports honestly route to NEEDS_REVIEW.
+  if (opts.degraded) {
+    blocks.push(
+      section(
+        '🔌 *AI DEGRADED* — extraction is heuristic-only (no LLM); ambiguous reports honestly route to NEEDS_REVIEW.',
+      ),
+    );
+  }
+  blocks.push(
     context(
       `As of ${asOfLabel(now)}  ·  ${filterLabel(filter)}${filter ? ` (${active.length} of ${needs.length})` : ''}`,
     ),
     divider,
-  ];
+  );
 
   // 1) LIVE COUNTERS + verified-today.
   if (active.length === 0) {

@@ -1,3 +1,4 @@
+import { getDegrade, selectExtractor } from '../demo/degradeMode';
 import type { CardRenderOptions, Notifier } from '../ingest/notifier';
 import { needCreatedKey, needEventKey } from '../ledger/idempotency';
 import type { NeedService } from '../ledger/needService';
@@ -6,6 +7,7 @@ import type { Actor, ProjectedNeed } from '../ledger/types';
 import { contactHash } from '../lib/contactHash';
 import { logger } from '../lib/logger';
 import type { ContactVault } from '../lib/vault';
+import type { LlmProvider } from '../llm/provider';
 import { normalizeContact } from './contact';
 import { runDedupe } from './dedupe';
 import type { Extractor } from './extract';
@@ -33,8 +35,13 @@ const EXTRACT_ACTOR: Actor = { type: 'agent', id: 'relay-extract' };
 export interface IntakeJobDeps {
   service: NeedService;
   notifier: Notifier;
-  /** P-1 extractor (LLM in live mode, deterministic heuristic in tests/demo). */
-  extractor: Extractor;
+  /** Pin the P-1 extractor explicitly (tests/demo pass the deterministic heuristic here). When
+   * omitted, the extractor is chosen PER JOB via selectExtractor({ llm, degraded }) so the live
+   * "/relay demo degrade llm" toggle takes effect without recapturing an extractor at boot. */
+  extractor?: Extractor;
+  /** LLM provider for per-job extractor selection (used only when `extractor` is not pinned):
+   * an LlmExtractor when present + not degraded, else the deterministic HeuristicExtractor. */
+  llm?: LlmProvider;
   /** Encrypted contact vault. Undefined = vaulting disabled (dev without a key). */
   vault?: ContactVault;
   /** The event store — when present, dedupe runs after extraction (setDedupeKeys +
@@ -88,9 +95,10 @@ async function applyExtraction(
   text: string,
   nowMs: number,
   deps: IntakeJobDeps,
+  extractor: Extractor,
   fallback: ProjectedNeed,
 ): Promise<ExtractionOutcome> {
-  const { payload, contact } = await runExtraction(text, deps.extractor);
+  const { payload, contact } = await runExtraction(text, extractor);
 
   if (contact !== null && deps.vault !== undefined) {
     await deps.vault.put(needId, contact);
@@ -218,8 +226,20 @@ export async function runIntakeJob(
   // message → undefined) we skip extraction and post the plain (pre-extraction) card
   // rather than losing the need.
   if (transient?.text !== undefined) {
+    // Choose the extractor PER JOB (not at boot) so the live degrade toggle takes effect: a pinned
+    // `extractor` wins (tests/demo); otherwise selectExtractor honours the AI-degraded flag —
+    // LlmExtractor when an llm is present and the AI is online, else the deterministic heuristic.
+    const extractor = deps.extractor ?? selectExtractor({ llm: deps.llm, degraded: getDegrade().llmDisabled });
     try {
-      const extracted = await applyExtraction(outcome.needId, job, transient.text, nowMs, deps, outcome.need);
+      const extracted = await applyExtraction(
+        outcome.needId,
+        job,
+        transient.text,
+        nowMs,
+        deps,
+        extractor,
+        outcome.need,
+      );
       projection = extracted.projection;
       contact = extracted.contact;
     } catch (err) {

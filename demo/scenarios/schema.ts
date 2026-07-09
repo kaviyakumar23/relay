@@ -24,6 +24,34 @@ import { z } from 'zod';
 export const languageSchema = z.enum(['en', 'ta-en']);
 export type ScenarioLanguage = z.infer<typeof languageSchema>;
 
+// --- SLA overrides (Moonshot #5: same engine, config-only) -----------------
+//
+// A scenario may carry an optional `sla:` block that overrides the engine's default SLA
+// budget table (src/drift/slaConfig.ts DEFAULT_SLA_TABLE) for this disaster. It is a PARTIAL
+// table: name only the (type, severity) cells this scenario changes; every omitted cell falls
+// back to the default at merge time (mergeSlaTable). This is the ONLY knob a second scenario
+// needs to run a different SLA regime on the SAME computeSlaDueAtMs / driftEngine — data, not
+// code. `need type`/`severity` mirror src/ledger/types (kept local so this schema stays self-
+// contained); budgets are real-world minutes (positive integers). partialRecord (zod v4) is
+// what makes the subset legal — a plain z.record over an enum key would demand every cell.
+
+/** Need types the SLA table is keyed by — mirrors src/ledger/types NeedType. */
+export const needTypeSchema = z.enum(['medical', 'rescue', 'food', 'water', 'shelter', 'transport', 'other']);
+export type ScenarioNeedType = z.infer<typeof needTypeSchema>;
+
+/** Severities the SLA table is keyed by — mirrors src/ledger/types Severity. */
+export const severitySchema = z.enum(['critical', 'high', 'medium', 'low']);
+export type ScenarioSeverity = z.infer<typeof severitySchema>;
+
+/** A partial SLA override table: `{ [type]: { [severity]: minutes } }`, any subset of cells.
+ * Structurally identical to src/drift/slaConfig.ts SlaOverrides, so `mergeSlaTable(scenario.sla)`
+ * type-checks without the demo schema importing engine internals. */
+export const slaOverridesSchema = z.partialRecord(
+  needTypeSchema,
+  z.partialRecord(severitySchema, z.number().int().positive()),
+);
+export type SlaOverrides = z.infer<typeof slaOverridesSchema>;
+
 /**
  * A raw intake message posted into `#relay-intake`. `id` is the stable ref
  * that expectations and volunteer steps point at (a need is created per
@@ -96,6 +124,12 @@ export type ScenarioStep = z.infer<typeof stepSchema>;
 //   report    — verified-impact narration + number-integrity/PII gates (§F7).
 //     · integrity_guard            { }                  a hallucinated number → template fallback
 //     · no_pii                     { }                  generated report Markdown is PII-clean
+//   degrade   — "Unplug the AI" (Moonshot #1).
+//     · honest_degradation         { }                  degraded loses no need, ≥ NEEDS_REVIEW
+//   requester_loop — close the loop with the requester (Moonshot #4).
+//     · bilingual_reply_in_source_thread { need_ref }   ta need → bilingual reply in its thread
+//   second_scenario — same engine, config-only SLA regime (Moonshot #5).
+//     · sla_table_config_drives_drift { }               override → earlier drift deadline, no fork
 //
 // `pairs` are ORDERED [duplicate_ref, original_ref]: the first is the later
 // message that should merge into / propose-merge with the second.
@@ -113,6 +147,10 @@ export const capabilitySchema = z.enum([
   'assistant',
   'mcp',
   'live_hero',
+  // Moonshot batch 1.
+  'degrade', // "Unplug the AI" — honest heuristic degradation, no need lost.
+  'requester_loop', // Language-matched progress reply into the requester's own thread.
+  'second_scenario', // Same engine, different disaster: a config-only SLA regime.
 ]);
 export type Capability = z.infer<typeof capabilitySchema>;
 
@@ -134,6 +172,14 @@ export const ASSERT_CATALOG = {
   // The LIVE self-serve hero (§F5): runLiveHeroDemo drives the full chain against the real
   // pipeline (the live analog of evidence/hero_e2e), and the App Home board renders over it.
   live_hero: ['hero_live_e2e', 'app_home_board'],
+  // Moonshot #1 — "Unplug the AI": with the toggle on, intake runs the HeuristicExtractor even
+  // when an LLM is present; no need is ever lost and NEEDS_REVIEW never drops vs AI-online.
+  degrade: ['honest_degradation'],
+  // Moonshot #4 — the requester gets a bilingual reply threaded into their own source message.
+  requester_loop: ['bilingual_reply_in_source_thread'],
+  // Moonshot #5 — the scenario's `sla:` override drives a genuinely different drift deadline for
+  // the same (type, severity) through the SAME computeSlaDueAtMs; nothing is recompiled.
+  second_scenario: ['sla_table_config_drives_drift'],
 } as const satisfies Record<Capability, readonly string[]>;
 
 const countParams = z.object({ count: z.number().int().nonnegative() });
@@ -242,6 +288,26 @@ export const expectationSchema = z.discriminatedUnion('assert', [
     assert: z.literal('app_home_board'),
     params: z.object({}).optional(),
   }),
+  // degrade (Moonshot #1) — the flood is driven once AI-online and once degraded; degraded loses
+  // no need and routes AT LEAST as many to NEEDS_REVIEW as AI-online (honest, never faked).
+  z.object({
+    capability: z.literal('degrade'),
+    assert: z.literal('honest_degradation'),
+    params: z.object({}).optional(),
+  }),
+  // requester_loop (Moonshot #4) — a bilingual progress reply lands in the ta need's SOURCE thread.
+  z.object({
+    capability: z.literal('requester_loop'),
+    assert: z.literal('bilingual_reply_in_source_thread'),
+    params: z.object({ need_ref: z.string().min(1) }),
+  }),
+  // second_scenario (Moonshot #5) — the scenario's SLA override yields a different (earlier) drift
+  // deadline for the same (type, severity) than the default, via the unchanged engine.
+  z.object({
+    capability: z.literal('second_scenario'),
+    assert: z.literal('sla_table_config_drives_drift'),
+    params: z.object({}).optional(),
+  }),
 ]);
 export type Expectation = z.infer<typeof expectationSchema>;
 
@@ -253,6 +319,9 @@ export const scenarioSchema = z.object({
   // Compressed clock (§12.3): 0.02 turns a 45-min SLA into ~54s so drift fires
   // on camera. Never > 1 (a scenario must not slow SLAs down).
   sla_multiplier: z.number().positive().max(1),
+  // Optional per-scenario SLA budget overrides (Moonshot #5). Omit (like flood-1) → the engine's
+  // default table. A second disaster supplies only the cells it changes; the rest fall back.
+  sla: slaOverridesSchema.optional(),
   steps: z.array(stepSchema).min(1),
   expectations: z.array(expectationSchema).min(1),
 });

@@ -2,17 +2,27 @@ import { existsSync, readFileSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { type Expectation, type IntakeMessageStep, type Scenario, scenarioSchema } from './schema';
 
-// scenario:lint — the guard that keeps flood-1.yaml honest (BUILD-DOC §12.2,
-// §F8). It (1) validates the scenario against the Zod schema, (2) cross-checks
-// internal consistency the schema can't express — refs resolve, declared
-// duplicate contacts actually match, expectation counts follow from the steps,
-// the hero drift->reassign is wired — and (3) does a light structural pass over
-// eval/intake_set.jsonl if that (separately-owned) file exists yet. Any problem
-// prints a precise message and exits 1. CLI entrypoint: console.error only.
+// scenario:lint — the guard that keeps the demo scenarios honest (BUILD-DOC §12.2,
+// §F8). For EACH scenario it (1) validates against the Zod schema, (2) cross-checks
+// internal consistency the schema can't express — refs resolve, declared duplicate
+// contacts actually match, expectation counts follow from the steps, the hero
+// drift->reassign is wired, the frozen composition holds — and (3) does a light
+// structural pass over eval/intake_set.jsonl if that (separately-owned) file exists
+// yet. flood-1 and heatwave-1 (Moonshot #5 — the config-only second disaster) both
+// go through the SAME checks. Any problem prints a precise message and exits 1.
+// CLI entrypoint: console.error only.
 
-const SCENARIO_URL = new URL('./flood-1.yaml', import.meta.url);
+const FLOOD_URL = new URL('./flood-1.yaml', import.meta.url);
+const HEATWAVE_URL = new URL('./heatwave-1.yaml', import.meta.url);
 const VOLUNTEERS_URL = new URL('../../seed/volunteers.json', import.meta.url);
 const EVAL_SET_URL = new URL('../../eval/intake_set.jsonl', import.meta.url);
+
+/** The frozen composition a scenario must hold (§12.2): code-mix / exact-dup / fuzzy-dup counts. */
+interface Composition {
+  codeMix: number;
+  exact: number;
+  fuzzy: number;
+}
 
 interface LintResult {
   errors: string[];
@@ -101,22 +111,25 @@ function lintEvalSet(errors: string[], summary: string[]): void {
   summary.push(`eval/intake_set.jsonl: ${records} record(s) structurally OK`);
 }
 
-function lintScenario(): LintResult {
+function lintScenario(
+  scenarioUrl: URL,
+  label: string,
+  composition: Composition,
+  volunteerIds: Set<string>,
+): LintResult {
   const errors: string[] = [];
   const summary: string[] = [];
 
-  const volunteerIds = loadSeedVolunteerIds(errors);
-
   // --- Parse + schema-validate ------------------------------------------
-  if (!existsSync(SCENARIO_URL)) {
-    errors.push(`demo/scenarios/flood-1.yaml not found`);
+  if (!existsSync(scenarioUrl)) {
+    errors.push(`demo/scenarios/${label}.yaml not found`);
     return { errors, summary };
   }
   let raw: unknown;
   try {
-    raw = parseYaml(readFileSync(SCENARIO_URL, 'utf8'));
+    raw = parseYaml(readFileSync(scenarioUrl, 'utf8'));
   } catch (err) {
-    errors.push(`flood-1.yaml is not valid YAML: ${(err as Error).message}`);
+    errors.push(`${label}.yaml is not valid YAML: ${(err as Error).message}`);
     return { errors, summary };
   }
   const parsed = scenarioSchema.safeParse(raw);
@@ -305,24 +318,44 @@ function lintScenario(): LintResult {
     }
   }
 
-  // --- Composition sanity: the frozen 3+2+1+1 mix (§12.2) ----------------
+  // --- Composition sanity: each scenario's frozen mix (§12.2) ------------
   const codeMix = intake.filter((m) => m.language === 'ta-en').length;
-  if (codeMix !== 3) errors.push(`expected exactly 3 Tamil-English (ta-en) messages, found ${codeMix}`);
-  if (exactDupCount !== 2) errors.push(`expected exactly 2 exact-contact duplicates, found ${exactDupCount}`);
-  if (fuzzyDupCount !== 1) errors.push(`expected exactly 1 fuzzy duplicate, found ${fuzzyDupCount}`);
+  if (codeMix !== composition.codeMix) {
+    errors.push(`${label}: expected exactly ${composition.codeMix} Tamil-English (ta-en) message(s), found ${codeMix}`);
+  }
+  if (exactDupCount !== composition.exact) {
+    errors.push(`${label}: expected exactly ${composition.exact} exact-contact duplicate(s), found ${exactDupCount}`);
+  }
+  if (fuzzyDupCount !== composition.fuzzy) {
+    errors.push(`${label}: expected exactly ${composition.fuzzy} fuzzy duplicate(s), found ${fuzzyDupCount}`);
+  }
 
   summary.push(
-    `flood-1: ${intake.length} intake messages (${codeMix} code-mix), ` +
+    `${label}: ${intake.length} intake messages (${codeMix} code-mix), ` +
       `${claims.length} claim(s) + ${replies.length} repl(y/ies), ${scenario.expectations.length} expectations`,
   );
-  summary.push(`dedupe: ${exactDupCount} exact-contact + ${fuzzyDupCount} fuzzy duplicate(s)`);
+  summary.push(`${label} dedupe: ${exactDupCount} exact-contact + ${fuzzyDupCount} fuzzy duplicate(s)`);
 
-  lintEvalSet(errors, summary);
   return { errors, summary };
 }
 
 function main(): number {
-  const { errors, summary } = lintScenario();
+  const errors: string[] = [];
+  const summary: string[] = [];
+  // The seed roster is loaded once and shared across scenarios (volunteer refs are checked per file).
+  const volunteerIds = loadSeedVolunteerIds(errors);
+
+  const scenarios: Array<{ url: URL; label: string; composition: Composition }> = [
+    { url: FLOOD_URL, label: 'flood-1', composition: { codeMix: 3, exact: 2, fuzzy: 1 } },
+    { url: HEATWAVE_URL, label: 'heatwave-1', composition: { codeMix: 2, exact: 1, fuzzy: 1 } },
+  ];
+  for (const s of scenarios) {
+    const res = lintScenario(s.url, s.label, s.composition, volunteerIds);
+    errors.push(...res.errors);
+    summary.push(...res.summary);
+  }
+  lintEvalSet(errors, summary);
+
   if (errors.length > 0) {
     console.error(`scenario:lint FAILED — ${errors.length} problem(s):`);
     for (const e of errors) console.error(`  ✗ ${e}`);

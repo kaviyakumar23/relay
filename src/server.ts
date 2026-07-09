@@ -24,7 +24,6 @@ import { logger } from './lib/logger';
 import { createLlm, type LlmProvider } from './llm/provider';
 import { loadLocalityCoords, loadSeedVolunteers } from './match/seedData';
 import { InMemoryVolunteerStore, PgVolunteerStore, type VolunteerStore } from './match/volunteerStore';
-import { type Extractor, HeuristicExtractor, LlmExtractor } from './pipeline/extract';
 import { makeIntakeJobHandler } from './pipeline/intakeJob';
 import { BullMQQueue, InlineQueue, type PipelineQueue } from './pipeline/queue';
 import { SlackTextFetcher } from './pipeline/textFetcher';
@@ -82,10 +81,11 @@ async function main(): Promise<void> {
   const botClient = new WebClient(botToken);
   const notifier = new SlackNotifier(botClient, () => roles.dispatchChannelId);
 
-  // P-1 extractor: the real provider when a key is configured, else the deterministic
-  // heuristic so intake still classifies (offline). The core pipeline is provider-agnostic.
+  // P-1 extractor: the real provider when a key is configured, else the deterministic heuristic
+  // so intake still classifies (offline). The core pipeline is provider-agnostic. The extractor is
+  // now chosen PER JOB inside the intake worker (selectExtractor) from the llm below, so the live
+  // "/relay demo degrade llm" toggle can unplug the AI without a restart.
   const hasLlmKey = config.llmProvider === 'anthropic' ? config.anthropicApiKey !== '' : config.openaiApiKey !== '';
-  const extractor: Extractor = hasLlmKey ? new LlmExtractor(createLlm()) : new HeuristicExtractor();
   // Encrypted contact vault (Postgres when a pool exists, else in-memory; disabled
   // with a single warning when CONTACT_VAULT_KEY is unset).
   const vault = createContactVault({ keyHex: config.contactVaultKey, pool });
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
   const jobHandler = makeIntakeJobHandler({
     service,
     notifier,
-    extractor,
+    llm: rationaleLlm,
     vault,
     store,
     contactHashKey,
@@ -218,7 +218,7 @@ async function main(): Promise<void> {
       store: pool ? 'postgres' : 'memory',
       queue: config.redisUrl ? 'bullmq' : 'inline',
       drift: config.redisUrl ? 'bullmq' : 'inmemory',
-      extractor: extractor.name,
+      extractor: rationaleLlm ? `llm:${rationaleLlm.name}` : 'heuristic',
       vault: vault ? 'on' : 'off',
     },
     'relay: booting live mode',
@@ -263,7 +263,10 @@ async function main(): Promise<void> {
 // take /healthz down and crash-loop the deploy. Log and keep serving instead. A
 // genuinely fatal boot error still exits via main().catch below.
 process.on('unhandledRejection', (reason) => {
-  logger.error({ err: reason instanceof Error ? reason.message : String(reason) }, 'relay: unhandled rejection (kept alive)');
+  logger.error(
+    { err: reason instanceof Error ? reason.message : String(reason) },
+    'relay: unhandled rejection (kept alive)',
+  );
 });
 process.on('uncaughtException', (err) => {
   logger.error({ err: err.message }, 'relay: uncaught exception (kept alive)');
