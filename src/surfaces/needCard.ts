@@ -1,3 +1,4 @@
+import type { BackupCandidate } from '../drift/prewarm';
 import type { NeedEvent } from '../ledger/events';
 import type { ConfidenceStatus, ProjectedNeed } from '../ledger/types';
 import { buildSignoffControls, MARK_DELIVERED_ACTION } from './evidenceModal';
@@ -88,6 +89,33 @@ export function parseMergeTarget(entityId: string): { needId: string; otherNeedI
 export interface DispatchCardOptions {
   events?: NeedEvent[];
   publicIdOf?: (needId: string) => string | undefined;
+  /** A pre-warmed backup volunteer for a live obligation (Moonshot — computeBackup). When present
+   * on a CLAIMED/IN_PROGRESS need, the card shows a standby chip so a reassignment is a known,
+   * one-tap hand-off. Advisory only — committing it is still the human-gated need_reassign_pick. */
+  backup?: BackupCandidate | null;
+}
+
+/** First display-name token only (workspace-public, never PII), escaped for mrkdwn. */
+function firstName(displayName: string): string {
+  const token = displayName.trim().split(/\s+/)[0] ?? displayName;
+  return escapeMrkdwn(token);
+}
+
+/**
+ * Standby chip for a pre-warmed backup on a live obligation (Moonshot). Rendered ONLY for a
+ * CLAIMED/IN_PROGRESS need with a backup present: it names the genuine #1 alternative candidate
+ * (first name + match score) so the coordinator already knows who is next if this drifts. Pure.
+ */
+function backupChip(need: ProjectedNeed, backup?: BackupCandidate | null): SlackBlock | null {
+  if (!backup) return null;
+  if (need.state !== 'CLAIMED' && need.state !== 'IN_PROGRESS') return null;
+  const name = firstName(backup.volunteer.display_name);
+  const pct = Math.round(backup.score * 100);
+  const atRisk = need.flags.is_drifting || need.flags.is_at_risk;
+  const text = atRisk
+    ? `🔁 *Backup pre-warmed* — ${name} (match ${pct}%) is scored and ready to take over if this reassigns.`
+    : `🔁 *Backup pre-warmed* — ${name} (match ${pct}%) is on standby if this drifts.`;
+  return context(text);
 }
 
 /** A friendly received-time label from an ISO timestamp (UTC, second precision). */
@@ -110,7 +138,7 @@ function slaDueLabel(iso: string): string {
  * The evidence controls (Mark delivered / packet / sign-off) are rendered by
  * evidenceFlowBlocks below, keyed off the delivery state.
  */
-function obligationStatusBlocks(need: ProjectedNeed): SlackBlock[] {
+function obligationStatusBlocks(need: ProjectedNeed, backup?: BackupCandidate | null): SlackBlock[] {
   const out: SlackBlock[] = [];
   const who = need.assigned_volunteer_id !== null ? ` <@${need.assigned_volunteer_id}>` : '';
   if (need.state === 'CLAIMED') {
@@ -130,6 +158,8 @@ function obligationStatusBlocks(need: ProjectedNeed): SlackBlock[] {
       out.push(context(`⏱️ SLA due ${due}`));
     }
   }
+  const chip = backupChip(need, backup);
+  if (chip !== null) out.push(chip);
   return out;
 }
 
@@ -147,10 +177,10 @@ const DELIVERED_STATES: ReadonlySet<string> = new Set(['DELIVERED_UNVERIFIED', '
  * Pure over the projection — buildEvidencePacket / buildSignoffControls / verificationStatus
  * are the single source of truth so this card can never disagree with the ledger's gate.
  */
-function evidenceFlowBlocks(need: ProjectedNeed): SlackBlock[] {
+function evidenceFlowBlocks(need: ProjectedNeed, backup?: BackupCandidate | null): SlackBlock[] {
   if (need.state === 'CLAIMED' || need.state === 'IN_PROGRESS') {
     return [
-      ...obligationStatusBlocks(need),
+      ...obligationStatusBlocks(need, backup),
       actions([button('📦 Mark delivered', MARK_DELIVERED_ACTION, need.need_id, 'primary')]),
     ];
   }
@@ -318,9 +348,9 @@ export function dispatchCard(publicId: string, need: ProjectedNeed, opts: Dispat
     // the plain obligation status otherwise. Reveal stays available until the delivery is
     // VERIFIED/CLOSED, then the contact controls hide (the loop is closed).
     if (DELIVERED_STATES.has(need.state) || need.state === 'CLAIMED' || need.state === 'IN_PROGRESS') {
-      blocks.push(...evidenceFlowBlocks(need));
+      blocks.push(...evidenceFlowBlocks(need, opts.backup));
     } else {
-      blocks.push(...obligationStatusBlocks(need));
+      blocks.push(...obligationStatusBlocks(need, opts.backup));
     }
     const revealHidden = need.state === 'VERIFIED' || need.state === 'CLOSED';
     // Secondary action row (§F2): Edit + Escalate on an in-flight committed need, plus the

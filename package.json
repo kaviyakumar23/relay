@@ -20,6 +20,7 @@
     "eval": "tsx eval/run.ts",
     "demo": "tsx src/demo/run.ts",
     "counterfactual": "tsx src/demo/counterfactualRun.ts",
+    "load": "tsx eval/loadReplayRun.ts",
     "mcp": "tsx src/mcp-server/stdio.ts",
     "db:migrate": "tsx src/lib/migrate.ts",
     "seed": "tsx src/demo/seed.ts",

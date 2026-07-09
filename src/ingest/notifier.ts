@@ -1,3 +1,4 @@
+import type { BackupCandidate } from '../drift/prewarm';
 import type { NeedEvent } from '../ledger/events';
 import type { ProjectedNeed } from '../ledger/types';
 import { appHomeView, type HomeViewOptions } from '../surfaces/appHome';
@@ -29,11 +30,18 @@ export interface CardRenderOptions {
   events?: NeedEvent[];
   publicIdOf?: (needId: string) => string | undefined;
   extraBlocks?: SlackBlock[];
+  /** A pre-warmed backup volunteer for a live obligation (Moonshot — computeBackup); threaded to
+   * the dispatch card so the standby chip renders on a CLAIMED/IN_PROGRESS need. */
+  backup?: BackupCandidate | null;
 }
 
 /** Compose the dispatch card + any appended blocks from render options. */
 function renderCardBlocks(publicId: string, projection: ProjectedNeed, opts?: CardRenderOptions): SlackBlock[] {
-  const card = dispatchCard(publicId, projection, { events: opts?.events, publicIdOf: opts?.publicIdOf });
+  const card = dispatchCard(publicId, projection, {
+    events: opts?.events,
+    publicIdOf: opts?.publicIdOf,
+    backup: opts?.backup,
+  });
   return opts?.extraBlocks && opts.extraBlocks.length > 0 ? [...card, ...opts.extraBlocks] : card;
 }
 

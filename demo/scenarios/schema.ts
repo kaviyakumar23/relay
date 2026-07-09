@@ -154,6 +154,9 @@ export const capabilitySchema = z.enum([
   // Moonshot batch 2.
   'agent_pledge', // An AI agent's pledge is a PROPOSAL a human confirms — tracked identically.
   'counterfactual', // Measured, SIMULATED delta vs a naive group-chat baseline (BASELINE-RULES.md).
+  // Moonshot batch 3.
+  'auditable_report', // Every donor-report figure carries a 🔍 Audit control → the redacted evidence chain.
+  'prewarm_backup', // A live obligation carries a pre-scored backup volunteer for a one-tap hand-off.
 ]);
 export type Capability = z.infer<typeof capabilitySchema>;
 
@@ -189,6 +192,12 @@ export const ASSERT_CATALOG = {
   // Moonshot #3 — the measured, clearly-SIMULATED counterfactual: the naive baseline leaves work
   // unclaimed + double-served and verifies nothing, while Relay dedupes the known pairs and verifies.
   counterfactual: ['counterfactual_beats_group_chat'],
+  // Moonshot #6 — every donor-report headline figure carries a 🔍 Audit control whose evidence chain
+  // is REDACTED to event type / evidence kind / time / actor role only (PII-free, read-only ledger).
+  auditable_report: ['audit_trail_redacted'],
+  // Moonshot — a live obligation carries a REAL pre-scored backup volunteer (the #1 alternative from
+  // the same deterministic scorer, current assignee excluded) so a reassignment is a one-tap hand-off.
+  prewarm_backup: ['backup_prewarmed'],
 } as const satisfies Record<Capability, readonly string[]>;
 
 const countParams = z.object({ count: z.number().int().nonnegative() });
@@ -332,6 +341,20 @@ export const expectationSchema = z.discriminatedUnion('assert', [
     capability: z.literal('counterfactual'),
     assert: z.literal('counterfactual_beats_group_chat'),
     params: z.object({}).optional(),
+  }),
+  // auditable_report (Moonshot #6) — a verified need's audit trail (buildAuditTrail) is redacted to
+  // event type / evidence kind / time / actor role only: PII-free, no actor id / evidence ref / note.
+  z.object({
+    capability: z.literal('auditable_report'),
+    assert: z.literal('audit_trail_redacted'),
+    params: z.object({}).optional(),
+  }),
+  // prewarm_backup (Moonshot) — a claimed need carries a genuine pre-scored backup volunteer that is
+  // NOT the current assignee; the standby chip renders on the card. Advisory, human-gated to commit.
+  z.object({
+    capability: z.literal('prewarm_backup'),
+    assert: z.literal('backup_prewarmed'),
+    params: z.object({ need_ref: z.string().min(1) }),
   }),
 ]);
 export type Expectation = z.infer<typeof expectationSchema>;

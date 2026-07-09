@@ -12,7 +12,9 @@ Crisis coordination tools exist, but none close the loop *inside the conversatio
 
 ## Measured extraction quality
 
-On a 40-message labelled set (`npm run eval`, reproducible with no API key via the deterministic baseline): **86.1% field-level accuracy · 100% critical-severity recall · 100% contact/locality accuracy.** These are the only numbers we publish — the product's ethos forbids invented impact statistics.
+On a 40-message labelled set (`npm run eval`, reproducible with no API key via the deterministic baseline): **86.1% field-level accuracy · 100% critical-severity recall · 100% contact/locality accuracy.** These are the only extraction-quality numbers we publish — the product's ethos forbids invented impact statistics.
+
+**Measured intake throughput (local/hermetic).** `npm run load` replays the frozen flood's 14 intake messages through the in-memory pipeline (heuristic extraction, no Slack/DB/Redis), 25×. On this machine: **intake p95 ≈ 0.13 ms, ~9,000 msg/s** — a *local, in-memory engine* measurement (reproduce with `npm run load`; exact figures are machine-dependent), never a production or Slack-round-trip SLA.
 
 ## 60-second local setup
 
@@ -48,6 +50,7 @@ machine (always-on) with self-hosted Fly Postgres + Upstash Redis and auto-HTTPS
 | `npm run eval` | Extraction-accuracy eval on `eval/intake_set.jsonl` — these numbers go in the submission verbatim |
 | `npm run demo` | In-memory storyboard run (no Slack, no infra) |
 | `npm run counterfactual` | Measured, clearly-**SIMULATED** delta vs a naive group-chat baseline (Moonshot #3; rules in `docs/BASELINE-RULES.md`) |
+| `npm run load` | **MEASURED** intake-throughput replay (**local/hermetic**) — p50/p95/p99 latency + throughput of the in-memory pipeline |
 | `npm run mcp` | MCP server over stdio (3 read-only tools + the opt-in `pledge_support` write tool — for Claude Desktop, see below) |
 | `npm run db:migrate` / `seed` | Apply `db/migrations/*.sql` / load demo seed data |
 | `npm run scenario:lint` | Validate demo scenario + eval set against their schemas |
@@ -99,6 +102,10 @@ Every value the tool returns is **PII-free** (as with the read tools) — it ech
 > **SIMULATED flood** — group-chat baseline: **2 unclaimed, 2 double-served, 0 verified** · Relay: **14 needs, 2 deduped, 1 verified**. Delta: **2 double-serves avoided, 2 requests kept owned instead of lost, +1 verified delivery** over the baseline's zero.
 
 Every number comes from **actually running both simulators** on the frozen scenario — nothing is fabricated or tuned to a target. The comparison is also asserted by the `counterfactual` demo capability (`npm run demo`).
+
+### Click-to-audit donor report (Moonshot #6)
+
+Every headline figure in `/relay report` carries a **🔍 Audit** control. A click reveals the **redacted, ledger-derived evidence chain** behind that number — each event shown as its **type, evidence kind, timestamp and actor *role* only** (human / agent / system), never a name, contact, note, actor id, or evidence file reference. It is a **read-only view over the append-only ledger**, PII-free by construction — the proof behind the number, not a separate source of truth. Asserted by the `auditable_report` demo capability (`npm run demo`), which proves the chain is redacted and grep-clean of the seed contacts. Two more sitrep/dispatch garnishes ship alongside it: `/relay sitrep` best-effort uploads a **live operations map** (SVG plotted on the fictional seed gazetteer), and a claimed obligation's card shows a **pre-warmed backup** — the genuine #1 alternative volunteer from the same deterministic scorer — so a reassignment is a one-tap hand-off (advisory only; committing it stays the human-gated reassign click).
 
 ## Docs
 

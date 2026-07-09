@@ -3,6 +3,7 @@ import type { Expectation, IntakeMessageStep, Scenario, VolunteerClaimStep } fro
 import { askRelay } from '../assistant/askRelay';
 import { buildDriftCallbacks } from '../drift/callbacks';
 import { runDriftSweep } from '../drift/driftEngine';
+import { computeBackup } from '../drift/prewarm';
 import { InMemoryScheduler } from '../drift/scheduler/inMemoryScheduler';
 import { computeSlaDueAtMs, slaDueAtIso } from '../drift/sla';
 import { DEFAULT_SLA_TABLE, mergeSlaTable } from '../drift/slaConfig';
@@ -36,7 +37,9 @@ import { HeuristicExtractor } from '../pipeline/extract';
 import { makeIntakeJobHandler } from '../pipeline/intakeJob';
 import { InlineQueue } from '../pipeline/queue';
 import { appHomeView } from '../surfaces/appHome';
+import { buildAuditTrail, buildReportAuditPanel, decodeFigureAudit } from '../surfaces/auditTrail';
 import { buildMatchBlocks, type MatchNeed, type RankedCandidate } from '../surfaces/matchCard';
+import { dispatchCard } from '../surfaces/needCard';
 import { selectExtractor, setDegrade } from './degradeMode';
 import { runFloodInjector, SIMULATOR_MARK } from './injector';
 import { HERO_BEATS, type LiveHeroDemoDeps, runLiveHeroDemo } from './liveOrchestrator';
@@ -1760,12 +1763,200 @@ export async function evaluateAgentPledge(scenario: Scenario): Promise<Expectati
   return results;
 }
 
+/**
+ * Evaluate Moonshot #6 — the click-to-audit donor report. Over the post-hero SHARED ledger (the
+ * hero need is CLOSED by evaluateEvidence) it generates the real report, takes a headline figure's
+ * backing need_ids, and proves — reading real outputs, never faking:
+ *   · the 🔍 Audit panel round-trips: a button's encoded value decodes back to that figure's backing
+ *     need_ids (so a click resolves the exact needs behind the number),
+ *   · the evidence chain (buildAuditTrail over the need's REAL event log) is REDACTED — it shows the
+ *     lifecycle (Need created → … → Verified on evidence) with actor ROLES, but leaks NO actor id, NO
+ *     evidence file reference, NO free-text note, and is PII-clean (assertNoPii + no seed digits).
+ * Requires evaluateEvidence to have run first (a verified need must back a figure).
+ */
+export async function evaluateAuditableReport(scenario: Scenario, a: HermeticAssembly): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const exp = scenario.expectations.find((e) => e.assert === 'audit_trail_redacted');
+  if (exp === undefined) return results;
+
+  const fail = (detail: string): void => {
+    results.push({ capability: 'auditable_report', assert: 'audit_trail_redacted', pass: false, detail });
+  };
+
+  const now = referenceNow(await a.service.listNeeds());
+  const resolvePublicId = async (id: string): Promise<string> => (await a.store.getPublicId(id)) ?? id;
+  const report = await generateReport({ service: a.service, period: { label: 'all time' }, now, resolvePublicId });
+
+  const figure = report.stats.stats.find((s) => (s.eventRefs?.length ?? 0) > 0);
+  if (figure === undefined || figure.eventRefs === undefined || figure.eventRefs.length === 0) {
+    fail('no verified need backs any report figure — the evidence finale must run first');
+    return results;
+  }
+
+  // (1) The audit panel round-trips: a button decodes back to this figure's backing need_ids.
+  const panel = buildReportAuditPanel(report.stats);
+  const panelJson = JSON.stringify(panel);
+  let decoded: { figureKey: string; needIds: string[] } | null = null;
+  for (const block of panel) {
+    for (const el of (block as { elements?: Array<{ value?: unknown }> }).elements ?? []) {
+      if (typeof el.value === 'string') {
+        const d = decodeFigureAudit(el.value);
+        if (d.figureKey === figure.key) decoded = d;
+      }
+    }
+  }
+  const roundTrips =
+    decoded !== null && decoded.needIds.length > 0 && decoded.needIds.every((id) => figure.eventRefs?.includes(id));
+
+  // (2) The redacted evidence chain for the first backing need, from its REAL event log.
+  const needId = figure.eventRefs[0] ?? '';
+  const events = await a.service.getEvents(needId);
+  const publicId = await resolvePublicId(needId);
+  const trailJson = JSON.stringify(buildAuditTrail(publicId, events));
+
+  const showsLifecycle =
+    trailJson.includes('Need created') && trailJson.includes('Verified on evidence') && trailJson.includes(publicId);
+  const showsActorRole = /a human actor|an automated agent|the system/.test(trailJson);
+  const leakedActorId = trailJson.includes('demo-coordinator') || trailJson.includes('relay-evidence');
+  const leakedEvidenceRef = trailJson.includes('F_DEMO_PHOTO');
+  const seedDigits = seedContactDigits(scenario);
+  const trailDigits = trailJson.replace(/\D+/g, '');
+  const leakedSeed = seedDigits.filter((d) => trailDigits.includes(d));
+  const piiClean = assertNoPii(trailJson).ok;
+
+  const redacted =
+    showsLifecycle && showsActorRole && !leakedActorId && !leakedEvidenceRef && leakedSeed.length === 0 && piiClean;
+  const pass = roundTrips && redacted && panelJson.includes('report_audit');
+  results.push({
+    capability: 'auditable_report',
+    assert: 'audit_trail_redacted',
+    pass,
+    detail: pass
+      ? `every report figure carries a 🔍 Audit control; ${publicId}'s evidence chain shows the lifecycle + actor ROLES only — no actor id, no evidence ref, PII-clean (assertNoPii ok, 0 of ${seedDigits.length} seed number(s))`
+      : `roundTrips=${roundTrips}, showsLifecycle=${showsLifecycle}, showsActorRole=${showsActorRole}, leakedActorId=${leakedActorId}, leakedEvidenceRef=${leakedEvidenceRef}, leakedSeed=${leakedSeed.length}, piiClean=${piiClean}`,
+  });
+  return results;
+}
+
+/**
+ * Evaluate Moonshot — the pre-warmed backup (a REAL scored candidate, not theater). On a FRESH
+ * assembly it plays the flood, confirms + assigns the named need to its top volunteer (→ CLAIMED
+ * with a stamped SLA), then proves — reading the scorer + the rendered card back:
+ *   · computeBackup returns a GENUINE scored candidate that is NOT the current assignee (same
+ *     deterministic scorer, current holder excluded), with a real positive score,
+ *   · the dispatch card renders the standby chip WITH that backup and does NOT render it WITHOUT one
+ *     (so the chip is driven by a real candidate), and the chip is PII-clean.
+ */
+export async function evaluatePrewarm(scenario: Scenario): Promise<ExpectationResult[]> {
+  const results: ExpectationResult[] = [];
+  const exp = scenario.expectations.find(
+    (e): e is Extract<Expectation, { assert: 'backup_prewarmed' }> => e.assert === 'backup_prewarmed',
+  );
+  if (exp === undefined) return results;
+
+  const fail = (detail: string): void => {
+    results.push({ capability: 'prewarm_backup', assert: 'backup_prewarmed', pass: false, detail });
+  };
+
+  const a = buildHermeticAssembly();
+  const run = await runScenario(scenario, a);
+  const seed = mapNeedsByStep(await a.service.listNeeds(), run).get(exp.params.need_ref);
+  if (seed === undefined) {
+    fail(`need ${exp.params.need_ref} not found`);
+    return results;
+  }
+  const needId = seed.need_id;
+  const coordinator = 'demo-coordinator';
+  const now = referenceNow(await a.service.listNeeds());
+
+  if (seed.state === 'TRIAGED' || seed.state === 'NEEDS_REVIEW') {
+    await a.service.dispatch(
+      needId,
+      { type: 'TriageConfirmed', payload: {} },
+      {
+        actor: { type: 'human', id: coordinator },
+        at: new Date(now).toISOString(),
+        idempotencyKey: needEventKey(needId, 'TriageConfirmed', 'prewarm'),
+        now,
+      },
+    );
+  }
+  const open = (await a.service.getNeed(needId, now)) ?? seed;
+  const scoreNeed: ScoreNeed = { type: open.type, localityId: open.locality_id, languages: open.languages };
+  const roster = await a.volunteerStore.list();
+  const assignee = topN(scoreNeed, roster, a.localities, 1)[0]?.volunteer.slack_user_id;
+  if (assignee === undefined) {
+    fail('no volunteer to assign — roster empty');
+    return results;
+  }
+  const assignedAt = now + 1000;
+  const slaIso = slaDueAtIso(open.type, open.severity, assignedAt, scenario.sla_multiplier);
+  const assigned = await a.service.dispatch(
+    needId,
+    { type: 'Assigned', payload: { volunteer_id: assignee, obligation_id: randomUUID(), sla_due_at: slaIso } },
+    {
+      actor: { type: 'human', id: coordinator },
+      at: new Date(assignedAt).toISOString(),
+      idempotencyKey: needEventKey(needId, 'Assigned', 'prewarm'),
+      now: assignedAt,
+    },
+  );
+  if (assigned.status !== 'applied') {
+    fail(`assign did not apply (${assigned.status})`);
+    return results;
+  }
+  await a.volunteerStore.incrementLoad(assignee, 1);
+  const claimed = (await a.service.getNeed(needId, assignedAt)) ?? open;
+
+  // The genuine pre-warmed backup: the #1 alternative with the assignee excluded.
+  const backup = computeBackup(
+    {
+      type: claimed.type,
+      localityId: claimed.locality_id,
+      languages: claimed.languages,
+      assignedVolunteerId: claimed.assigned_volunteer_id,
+    },
+    await a.volunteerStore.list(),
+    a.localities,
+  );
+  const realCandidate = backup !== null && backup.volunteer.slack_user_id !== assignee && backup.score > 0;
+
+  // Card WITH the backup shows the chip; WITHOUT it, no chip.
+  const publicId = (await a.store.getPublicId(needId)) ?? needId;
+  const events = await a.service.getEvents(needId);
+  const withCard = dispatchCard(publicId, claimed, { events, backup });
+  const withoutCard = dispatchCard(publicId, claimed, { events });
+  const chipText = (() => {
+    for (const b of withCard) {
+      for (const el of (b as { elements?: Array<{ text?: unknown }> }).elements ?? []) {
+        if (typeof el.text === 'string' && el.text.includes('Backup pre-warmed')) return el.text;
+      }
+    }
+    return '';
+  })();
+  const backupName = backup ? (backup.volunteer.display_name.trim().split(/\s+/)[0] ?? '') : '';
+  const chipShown = chipText.includes('Backup pre-warmed') && backupName.length > 0 && chipText.includes(backupName);
+  const chipHiddenWithout = !JSON.stringify(withoutCard).includes('Backup pre-warmed');
+  const piiSafe = assertNoPii(chipText).ok && !/\d{7,}/.test(chipText);
+
+  const pass = realCandidate && chipShown && chipHiddenWithout && piiSafe && claimed.state === 'CLAIMED';
+  results.push({
+    capability: 'prewarm_backup',
+    assert: 'backup_prewarmed',
+    pass,
+    detail: pass
+      ? `${publicId} claimed by ${assignee}; pre-warmed backup ${backup?.volunteer.slack_user_id} (match ${Math.round((backup?.score ?? 0) * 100)}%, ≠ assignee) renders on the card and is absent without a backup — a real scored candidate, PII-free`
+      : `realCandidate=${realCandidate}, chipShown=${chipShown}, chipHiddenWithout=${chipHiddenWithout}, piiSafe=${piiSafe}, state=${claimed.state}`,
+  });
+  return results;
+}
+
 /** Asserts the driver evaluates today: the walking skeleton, extraction-backed triage,
  * dedupe auto-detection, the deterministic match slate, the drift/reassign hero arc, the
  * evidence/verification finale, the sitrep/report narration guarantees (F6/F7), the F8
  * judge experience + P1 assistant/MCP flourishes, the live self-serve hero (§F5), and the
- * moonshot batch (honest degrade, the requester loop, the config-only second scenario).
- * Everything else is a documented SKIP. */
+ * moonshot batch (honest degrade, the requester loop, the config-only second scenario,
+ * click-to-audit, and the pre-warmed backup). Everything else is a documented SKIP. */
 const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   'needs_created_count',
   'needs_review_count',
@@ -1793,6 +1984,9 @@ const EVALUATED_ASSERTS: ReadonlySet<string> = new Set([
   // Moonshot batch 2 — the agent-pledge accountability chain and the SIMULATED counterfactual.
   'pledge_requires_human_confirm',
   'counterfactual_beats_group_chat',
+  // Moonshot batch 3 — the click-to-audit donor report + the pre-warmed backup.
+  'audit_trail_redacted',
+  'backup_prewarmed',
 ]);
 
 export interface SkippedExpectation {

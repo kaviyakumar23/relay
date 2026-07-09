@@ -15,6 +15,7 @@ import {
 import { compressedClockNote, type InjectorPostMessage, runFloodInjector, SIMULATOR_IDENTITY } from '../demo/injector';
 import { type LiveHeroDemoDeps, type NarrateChannel, runLiveHeroDemo } from '../demo/liveOrchestrator';
 import { type DemoResetStore, type ResetDemoResult, resetDemo } from '../demo/reset';
+import { type BackupCandidate, computeBackup } from '../drift/prewarm';
 import { slaDueAtIso } from '../drift/sla';
 import { needEventKey } from '../ledger/idempotency';
 import type { NeedService } from '../ledger/needService';
@@ -33,6 +34,7 @@ import { generateSitrep } from '../narrate/sitrep';
 import type { PipelineQueue } from '../pipeline/queue';
 import type { HomeViewOptions } from '../surfaces/appHome';
 import { buildAssistantAnswer } from '../surfaces/assistantAnswer';
+import { buildAuditTrail, buildReportAuditPanel, decodeFigureAudit, REPORT_AUDIT_ACTION } from '../surfaces/auditTrail';
 import { buildCanvasDocument, type CanvasWriteClient, writeCanvas } from '../surfaces/canvas';
 import { buildNudgeBlocks, DELAYED_ACTION, ENROUTE_ACTION, type NudgeAck, RELEASE_ACTION } from '../surfaces/driftCard';
 import { buildEditModal, EDIT_CALLBACK_ID, parseEditSubmission } from '../surfaces/editModal';
@@ -65,6 +67,7 @@ import {
   REASSIGN_PICK_ACTION,
 } from '../surfaces/matchCard';
 import { NEED_EDIT_ACTION, NEED_ESCALATE_ACTION, parseMergeTarget } from '../surfaces/needCard';
+import { buildOpsMapSvg } from '../surfaces/opsMap';
 import {
   ACTIONS,
   context,
@@ -469,6 +472,51 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     if (ref !== null && needId !== '') needCardRefs.set(needId, ref);
   };
 
+  // Pre-warmed backup (Moonshot). For a live obligation (CLAIMED/IN_PROGRESS with an assignee),
+  // compute the genuine #1 alternative volunteer via the SAME deterministic scorer the match +
+  // reassignment paths use, so the dispatch card can show a standby chip. Best-effort — a scoring
+  // hiccup degrades to "no backup" and never blocks the card. Non-delivering needs get null.
+  const computeBackupFor = async (need: ProjectedNeed): Promise<BackupCandidate | null> => {
+    if (need.state !== 'CLAIMED' && need.state !== 'IN_PROGRESS') return null;
+    if (need.assigned_volunteer_id === null) return null;
+    try {
+      const volunteers = await deps.volunteerStore.list();
+      return computeBackup(
+        {
+          type: need.type,
+          localityId: need.locality_id,
+          languages: need.languages,
+          assignedVolunteerId: need.assigned_volunteer_id,
+        },
+        volunteers,
+        deps.localities,
+      );
+    } catch (err) {
+      logger.debug({ err, need_id: need.need_id }, 'prewarm: computeBackup failed (non-fatal)');
+      return null;
+    }
+  };
+
+  // Best-effort heads-up DM to a pre-warmed backup, only for the urgent needs worth pre-staging
+  // (critical|high). Advisory only — the backup is NOT assigned; committing is still the human-gated
+  // need_reassign_pick. A Slack failure (e.g. a seed id that can't be DM'd) is swallowed.
+  const sendBackupHeadsUp = async (
+    need: ProjectedNeed,
+    backup: BackupCandidate | null,
+    publicId: string,
+  ): Promise<void> => {
+    if (backup === null) return;
+    if (need.severity !== 'critical' && need.severity !== 'high') return;
+    const text =
+      `Heads-up — you're the pre-warmed backup for ${publicId} (${need.type}, ${need.severity}). ` +
+      `No action needed unless a coordinator reassigns it to you.`;
+    try {
+      await deps.notifier.postDirect(backup.volunteer.slack_user_id, text, [section(text)]);
+    } catch (err) {
+      logger.debug({ err, need_id: need.need_id }, 'prewarm: backup heads-up DM failed (non-fatal)');
+    }
+  };
+
   // --- App Home operations board (F2) -----------------------------------------
   // The live board is PURE over the projection; the integrator owns two bits of view state:
   //   · homeFilters — each viewer's active board filter (a view preference, NOT ledger state).
@@ -763,13 +811,17 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     const ref = readCardRef(body);
     rememberCard(needId, ref);
     const need = res.need ?? (await deps.service.getNeed(needId));
+    const backup = need !== null ? await computeBackupFor(need) : null;
     if (ref !== null && need !== null) {
       const publicId = await resolvePublicId(needId);
       const events = await deps.service.getEvents(needId);
       await deps.notifier.updateCard(ref, { needId, publicId }, need, {
         events,
+        backup,
         extraBlocks: [context(`✅ *Assigned to ${escapeMrkdwn(name)}*`)],
       });
+      // Pre-warm the backup: heads-up DM for the urgent needs (best-effort, advisory).
+      void sendBackupHeadsUp(need, backup, publicId);
     }
     // Tell the requester help is on the way, in their own thread + language (best-effort).
     await notifyRequester(needId, 'assigned', { need });
@@ -1091,13 +1143,17 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     const ref = readCardRef(body);
     rememberCard(needId, ref);
     const updated = res.need ?? (await deps.service.getNeed(needId));
+    const backup = updated !== null ? await computeBackupFor(updated) : null;
     if (ref !== null && updated !== null) {
       const publicId = await resolvePublicId(needId);
       const events = await deps.service.getEvents(needId);
       await deps.notifier.updateCard(ref, { needId, publicId }, updated, {
         events,
+        backup,
         extraBlocks: [context(`🔄 *Reassigned to ${escapeMrkdwn(name)}* — fresh SLA clock started.`)],
       });
+      // Re-warm the backup for the NEW holder (excludes them from the fresh backup pool).
+      void sendBackupHeadsUp(updated, backup, publicId);
     }
     void refreshHomes(); // the obligation moved to a new volunteer with a fresh SLA
   });
@@ -1120,8 +1176,9 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     if (need === null) return;
     const publicId = await resolvePublicId(needId);
     const events = await deps.service.getEvents(needId);
+    const backup = await computeBackupFor(need);
     try {
-      await deps.notifier.updateCard(ref, { needId, publicId }, need, { events });
+      await deps.notifier.updateCard(ref, { needId, publicId }, need, { events, backup });
     } catch (err) {
       logger.debug({ err, need_id: needId }, 'evidence card update failed');
     }
@@ -1336,6 +1393,43 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     // Thank the requester and confirm their need is verified + closed (best-effort, their thread).
     await notifyRequester(needId, 'verified');
     void refreshHomes(); // VERIFIED → CLOSED bumps the "verified in the last 24h" counter
+  });
+
+  // --- Click-to-audit the donor report (Moonshot #6) --------------------------
+  // A 🔍 Audit button under a report figure → post the redacted, ledger-derived evidence chain
+  // behind that number, ephemerally to the clicker ("the proof behind this number"). READ-ONLY over
+  // the ledger and PII-free by construction: buildAuditTrail redacts every event to its type,
+  // evidence kind, timestamp, and actor ROLE only — never a name, contact, note, or file reference.
+  app.action(new RegExp(`^${REPORT_AUDIT_ACTION}:`), async ({ ack, body, action }) => {
+    await ack();
+    const ctx = readBodyContext(body);
+    const { figureKey, needIds } = decodeFigureAudit(readActionValue(action));
+    if (!ctx.channel || !ctx.user || needIds.length === 0) return;
+    const blocks: SlackBlock[] = [
+      section(`🔍 *The proof behind “${escapeMrkdwn(figureKey)}”* — redacted, read-only, straight from the ledger.`),
+    ];
+    // Cap the needs rendered so the ephemeral stays well under Slack's 100-block ceiling.
+    for (const needId of needIds.slice(0, 3)) {
+      try {
+        const events = await deps.service.getEvents(needId);
+        if (events.length === 0) continue;
+        const publicId = await resolvePublicId(needId);
+        blocks.push(...buildAuditTrail(publicId, events, { limit: 14 }), divider);
+      } catch (err) {
+        logger.debug({ err, need_id: needId }, 'report audit: getEvents failed');
+      }
+    }
+    if (needIds.length > 3) blocks.push(context(`…and ${needIds.length - 3} more need(s) behind this figure.`));
+    try {
+      await deps.notifier.postEphemeral({
+        channel: ctx.channel,
+        user: ctx.user,
+        text: 'The proof behind this number',
+        blocks,
+      });
+    } catch (err) {
+      logger.error({ err, figure: figureKey }, 'report audit ephemeral failed');
+    }
   });
 
   // --- Judge experience (F8) --------------------------------------------------
@@ -1617,9 +1711,31 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     }
     // Degrade honours the toggle: with the AI unplugged, narration falls back to the deterministic
     // template (narrationLlmFor → undefined) instead of the LLM.
+    const now = Date.now();
     const narrateLlm = narrationLlmFor(deps.llm, getDegrade().llmDisabled);
-    const sitrep = await generateSitrep({ service: deps.service, llm: narrateLlm, now: Date.now() });
-    await deps.notifier.postToChannel(channel, sitrep.text, sitrep.blocks);
+    const sitrep = await generateSitrep({ service: deps.service, llm: narrateLlm, now });
+    const posted = await deps.notifier.postToChannel(channel, sitrep.text, sitrep.blocks);
+    // Best-effort ops-map garnish: plot the live needs onto the fictional gazetteer and upload the
+    // SVG threaded under the sitrep. Wrapped so ANY failure (upload error, no uploader) never breaks
+    // the sitrep. Uses ONLY fictional gazetteer coordinates + the ledger's derived fields (no PII).
+    try {
+      const mapNeeds = await deps.service.listNeeds(now);
+      const svg = buildOpsMapSvg(mapNeeds, deps.localities);
+      const uploader = client as unknown as {
+        files?: { uploadV2?: (a: Record<string, unknown>) => Promise<unknown> };
+      };
+      if (typeof uploader.files?.uploadV2 === 'function') {
+        await uploader.files.uploadV2({
+          channel_id: channel,
+          thread_ts: posted.ts || undefined,
+          filename: 'relay-ops-map.svg',
+          title: 'Relay — live operations map (fictional gazetteer)',
+          content: svg,
+        });
+      }
+    } catch (err) {
+      logger.warn({ err }, 'sitrep: ops-map upload failed (non-fatal)');
+    }
     await writeCanvas(client as unknown as CanvasWriteClient, {
       channelId: channel,
       title: 'Relay sitrep',
@@ -1648,7 +1764,11 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
       now,
       resolvePublicId,
     });
-    await deps.notifier.postToChannel(channel, report.text, report.blocks);
+    // Append the 🔍 Audit panel (Moonshot #6): one control per headline figure whose click reveals
+    // the redacted evidence chain behind that number. Pure over the report's own (need-id-backed)
+    // stats; empty when nothing is verified yet, so it never adds a dead button.
+    const auditPanel = buildReportAuditPanel(report.stats);
+    await deps.notifier.postToChannel(channel, report.text, [...report.blocks, ...auditPanel]);
     // Best-effort: upload the Markdown as a file snippet (never blocks the summary).
     const uploader = client as unknown as {
       files?: { uploadV2?: (a: Record<string, unknown>) => Promise<unknown> };

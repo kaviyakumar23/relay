@@ -6,6 +6,7 @@ import {
   type ExpectationResult,
   evaluateAgentPledge,
   evaluateAssistant,
+  evaluateAuditableReport,
   evaluateDedupe,
   evaluateDegrade,
   evaluateDrift,
@@ -14,6 +15,7 @@ import {
   evaluateLiveHero,
   evaluateMatch,
   evaluateMcp,
+  evaluatePrewarm,
   evaluateReport,
   evaluateRequester,
   evaluateSecondScenario,
@@ -61,6 +63,8 @@ async function evaluateScenario(scenario: Scenario): Promise<ExpectationResult[]
     ...(await evaluateEvidence(scenario, assembly, run)),
     ...(await evaluateSitrep(scenario, assembly)),
     ...(await evaluateReport(scenario, assembly)),
+    // Moonshot #6 — the click-to-audit donor report, over the same post-hero ledger.
+    ...(await evaluateAuditableReport(scenario, assembly)),
     // F8 judge experience + the two P1 flourishes, on the post-hero ledger.
     ...(await evaluateJudge(scenario, assembly)),
     ...(await evaluateAssistant(scenario, assembly)),
@@ -77,6 +81,8 @@ async function evaluateScenario(scenario: Scenario): Promise<ExpectationResult[]
     // no such expectation (heatwave-1).
     ...(await evaluateAgentPledge(scenario)),
     ...(await evaluateCounterfactual(scenario)),
+    // Moonshot batch 3 — the pre-warmed backup (own fresh assembly; no-op for a scenario without it).
+    ...(await evaluatePrewarm(scenario)),
   ];
 }
 

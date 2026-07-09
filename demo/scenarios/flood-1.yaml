@@ -335,3 +335,18 @@ expectations:
   # deployment. Also runnable standalone via `npm run counterfactual`.
   - capability: counterfactual
     assert: counterfactual_beats_group_chat
+
+  # auditable_report (Moonshot #6) — the donor report's headline figures each carry a 🔍 Audit
+  # control. The evidence chain behind a verified need (buildAuditTrail over its real event log) is
+  # REDACTED to event type, evidence kind, timestamp and actor ROLE only — never a name, contact,
+  # actor id, evidence file reference, or free-text note. Proven PII-free against the seed contacts.
+  - capability: auditable_report
+    assert: audit_trail_redacted
+
+  # prewarm_backup (Moonshot) — the critical dialysis need m02, once claimed, carries a genuine
+  # pre-scored backup volunteer (the #1 alternative from the SAME deterministic scorer, the current
+  # assignee excluded), and the standby chip renders on its card. Advisory only — committing the
+  # backup is still the human-gated need_reassign_pick.
+  - capability: prewarm_backup
+    assert: backup_prewarmed
+    params: { need_ref: m02 }
