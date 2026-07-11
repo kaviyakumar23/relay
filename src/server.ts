@@ -5,6 +5,7 @@ import pg from 'pg';
 import { parseScenario, type Scenario } from '../demo/scenarios/schema';
 import { config } from './config';
 import { InMemoryDemoResetStore, PgDemoResetStore } from './demo/reset';
+import { seed as seedDatabase } from './demo/seed';
 import { buildDriftCallbacks } from './drift/callbacks';
 import { runDriftSweep } from './drift/driftEngine';
 import { BullmqScheduler } from './drift/scheduler/bullmqScheduler';
@@ -55,6 +56,19 @@ async function main(): Promise<void> {
     } catch (err) {
       logger.error({ err }, 'relay: startup migrations failed — refusing to serve without a schema');
       process.exit(1);
+    }
+
+    // Seed the org roster + gazetteer on boot (idempotent upserts by name / slack_user_id).
+    // A fresh Postgres has an empty localities table — but the geocoder stamps needs with a
+    // gazetteer id (1-based array index), so without the rows every located need FK-violates,
+    // and matching has no volunteers. Seeding the empty table in file order lands ids 1..N that
+    // match the geocoder's contract. Best-effort: a seed failure degrades matching but must NOT
+    // take down the server (the ledger + healthz still work).
+    try {
+      const counts = await seedDatabase(config.databaseUrl);
+      logger.info(counts, 'relay: startup seed applied (localities + volunteers)');
+    } catch (err) {
+      logger.error({ err }, 'relay: startup seed failed — matching/geocoding may be degraded until fixed');
     }
   }
 
