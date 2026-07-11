@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { App, Assistant } from '@slack/bolt';
 import type { WebClient } from '@slack/web-api';
 import type { Scenario } from '../../demo/scenarios/schema';
@@ -344,21 +343,6 @@ export interface BuiltSlackApp {
 /** The structural slice of Bolt's slash-command `respond` the sitrep/report helpers use. */
 type SlashRespond = (message: { response_type?: 'ephemeral' | 'in_channel'; text: string }) => Promise<unknown>;
 
-// The marketing landing page (public/index.html), served at GET / so the same Fly
-// host that runs the Slack app also serves relay-crisis.fly.dev. Read once and
-// cached; a missing file degrades to a tiny placeholder rather than crashing.
-let landingPageCache: string | null = null;
-function landingPage(): string {
-  if (landingPageCache !== null) return landingPageCache;
-  try {
-    landingPageCache = readFileSync('public/index.html', 'utf8');
-  } catch {
-    landingPageCache =
-      '<!doctype html><title>Relay</title><h1>Relay — crisis coordination inside Slack</h1><p>See <a href="https://github.com/indrapranesh/relay-crisis">the repo</a>.</p>';
-  }
-  return landingPageCache;
-}
-
 /** Wire the Bolt app onto the intake pipeline. Returns start() to resolve channels
  * and boot the app (Socket Mode or HTTP). */
 export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
@@ -370,15 +354,6 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
     appToken: deps.appToken,
     port: deps.port,
     customRoutes: [
-      {
-        // The landing page at the root, served from the same host as the Slack app.
-        path: '/',
-        method: 'GET',
-        handler: (_req, res) => {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-          res.end(landingPage());
-        },
-      },
       {
         path: '/healthz',
         method: 'GET',
