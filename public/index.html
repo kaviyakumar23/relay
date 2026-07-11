@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Relay — verified crisis coordination inside Slack</title>
+<meta name="description" content="In a disaster, the deadliest thing is a lost message. Relay turns chaotic volunteer Slack channels into a verified, accountable relief operation — every need tracked, every promise proven.">
+<meta property="og:title" content="Relay — verified crisis coordination inside Slack">
+<meta property="og:description" content="Every need tracked, every promise proven. An event-sourced Slack agent for crisis response.">
+<meta property="og:type" content="website">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800;900&family=Public+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;font-family:'Public Sans',ui-sans-serif,system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif;background:var(--bg);color:var(--text);line-height:1.5;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  :root{
+    --bg:#FBFAF7;--surface:#FFFFFF;--surface-2:#F4F1EA;--surface-3:#ECE7DC;
+    --text:#16202B;--text-2:#5C6B78;--line:rgba(22,32,43,.13);--line-2:rgba(22,32,43,.07);
+    --accent:#C1272D;--accent-text:#C1272D;--accent-soft:rgba(193,39,45,.09);
+    --ok:#2E7D5B;--ok-text:#2E7D5B;--ok-soft:rgba(46,125,91,.11);
+    --spine:#C1272D;
+    --shadow:0 1px 2px rgba(22,32,43,.05),0 18px 40px -20px rgba(22,32,43,.18);
+    color-scheme:light;
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --bg:#10161D;--surface:#18222E;--surface-2:#1C2734;--surface-3:#243141;
+    --text:#F1EDE6;--text-2:#96A4B0;--line:rgba(255,255,255,.13);--line-2:rgba(255,255,255,.06);
+    --accent:#C1272D;--accent-text:#F0665F;--accent-soft:rgba(240,102,95,.13);
+    --ok:#2E7D5B;--ok-text:#63BF90;--ok-soft:rgba(99,191,144,.13);
+    --spine:#DA453F;
+    --shadow:0 1px 2px rgba(0,0,0,.35),0 22px 48px -22px rgba(0,0,0,.7);
+    color-scheme:dark;
+  }}
+  :root[data-theme="dark"]{
+    --bg:#10161D;--surface:#18222E;--surface-2:#1C2734;--surface-3:#243141;
+    --text:#F1EDE6;--text-2:#96A4B0;--line:rgba(255,255,255,.13);--line-2:rgba(255,255,255,.06);
+    --accent:#C1272D;--accent-text:#F0665F;--accent-soft:rgba(240,102,95,.13);
+    --ok:#2E7D5B;--ok-text:#63BF90;--ok-soft:rgba(99,191,144,.13);
+    --spine:#DA453F;
+    --shadow:0 1px 2px rgba(0,0,0,.35),0 22px 48px -22px rgba(0,0,0,.7);
+    color-scheme:dark;
+  }
+  a{color:var(--accent-text);text-decoration:none}
+  a:hover{text-decoration:underline}
+  ::selection{background:var(--accent);color:#fff}
+  :where(a,button,[tabindex]):focus-visible{outline:2px solid var(--accent-text);outline-offset:3px;border-radius:3px}
+  [id]{scroll-margin-top:88px}
+  [data-icon="sun"]{display:none}
+  :root[data-theme="dark"] [data-icon="sun"]{display:inline-flex}
+  :root[data-theme="dark"] [data-icon="moon"]{display:none}
+  :root[data-nofeed] [data-herofeed]{display:none}
+  :root[data-nofeed] [data-herogrid]{grid-template-columns:1fr;max-width:900px}
+  @keyframes feed{from{transform:translateY(0)}to{transform:translateY(-50%)}}
+  @keyframes flare{0%,100%{box-shadow:inset 3px 0 0 var(--accent),0 0 0 0 var(--accent-soft)}50%{box-shadow:inset 3px 0 0 var(--accent),0 0 0 7px var(--accent-soft)}}
+  @keyframes reveal{to{opacity:1;transform:none}}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  @media (prefers-reduced-motion:no-preference){
+    html{scroll-behavior:smooth}
+    :root:not([data-calm]) [data-anim="feed"]{animation:feed 30s linear infinite}
+    :root:not([data-calm]) [data-anim="flare"]{animation:flare 3.4s ease-in-out infinite}
+    :root:not([data-calm]) [data-anim="pulse"]{animation:pulse 2s ease-in-out infinite}
+    :root:not([data-calm]) [data-reveal]{opacity:0;transform:translateY(14px);animation:reveal .7s cubic-bezier(.2,.7,.2,1) forwards}
+  }
+  @media (max-width:860px){[data-grid]{grid-template-columns:1fr!important}}
+  @media (max-width:720px){
+    [data-navlinks]{display:none!important}
+    [data-spine]{flex-direction:column!important;align-items:stretch!important;gap:0!important}
+    [data-spine] [data-node]{flex-direction:row!important;text-align:left!important;padding:13px 0!important;gap:16px!important}
+    [data-spine] [data-nodec]{align-items:flex-start!important}
+    [data-spineline]{left:8px!important;right:auto!important;top:0!important;bottom:0!important;height:auto!important;width:2px!important}
+  }
+</style>
+<script>
+  (function(){try{var t=localStorage.getItem('relay-theme');if(!t){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light';}document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();
+</script>
+</head>
+<body>
+<header style="position:sticky;top:0;z-index:60;background:color-mix(in srgb,var(--bg) 84%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--line)">
+  <div style="max-width:1180px;margin:0 auto;padding:13px 24px;display:flex;align-items:center;gap:20px">
+    <a href="#top" style="font-family:'Archivo',sans-serif;font-weight:800;font-size:1.28rem;letter-spacing:-.02em;color:var(--text);display:inline-flex;align-items:center">Relay<span style="color:var(--accent);margin-left:1px">.</span></a>
+    <nav data-navlinks style="margin-left:auto;display:flex;align-items:center;gap:28px">
+      <a href="#loop" style="font-size:.9rem;font-weight:500;color:var(--text-2)" style-hover="color:var(--text)">The loop</a>
+      <a href="#proof" style="font-size:.9rem;font-weight:500;color:var(--text-2)" style-hover="color:var(--text)">Proof</a>
+      <a href="#platform" style="font-size:.9rem;font-weight:500;color:var(--text-2)" style-hover="color:var(--text)">Platform</a>
+    </nav>
+    <a href="https://github.com/indrapranesh/relay-crisis" style="font-size:.9rem;font-weight:600;color:var(--text)" style-hover="color:var(--accent-text)">GitHub</a>
+    <button type="button" aria-label="Toggle color theme" onclick="relayToggleTheme()" style="display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border-radius:9px;border:1px solid var(--line);background:var(--surface);color:var(--text);cursor:pointer" style-hover="border-color:var(--text-2)">
+      <span data-icon="moon" style="display:inline-flex"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></span>
+      <span data-icon="sun" style="align-items:center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2v2.4M12 19.6V22M22 12h-2.4M4.4 12H2M18.4 5.6l-1.7 1.7M7.3 16.7l-1.7 1.7M18.4 18.4l-1.7-1.7M7.3 7.3 5.6 5.6"/></svg></span>
+    </button>
+  </div>
+</header>
+
+<section id="top" data-screen-label="Hero" data-herogrid data-grid style="max-width:1180px;margin:0 auto;padding:clamp(52px,7vw,96px) 24px clamp(60px,8vw,104px);display:grid;grid-template-columns:minmax(0,1.12fr) minmax(300px,.88fr);gap:clamp(34px,5vw,68px);align-items:center">
+  <div>
+    <span data-reveal style="display:inline-flex;align-items:center;gap:9px;font-family:'IBM Plex Mono',monospace;font-size:.71rem;font-weight:500;letter-spacing:.13em;text-transform:uppercase;color:var(--accent-text);background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);padding:7px 13px;border-radius:999px"><span style="width:7px;height:7px;border-radius:50%;background:var(--accent);display:inline-block"></span>Agent for Good · Slack Agent Builder Challenge</span>
+    <h1 data-reveal style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(2.5rem,5.6vw,4.7rem);line-height:1.01;letter-spacing:-.03em;margin:22px 0 0;text-wrap:balance">In a disaster, the deadliest thing is a lost message.</h1>
+    <p data-reveal style="font-size:clamp(1.08rem,1.7vw,1.35rem);color:var(--text-2);max-width:40ch;margin:22px 0 0;line-height:1.5">Verified crisis coordination inside Slack — every need tracked, every promise proven.</p>
+    <div data-reveal style="display:flex;flex-wrap:wrap;gap:12px;margin-top:32px">
+      <a href="https://github.com/indrapranesh/relay-crisis" style="display:inline-flex;align-items:center;gap:9px;background:var(--accent);color:#fff;font-weight:600;font-size:.98rem;padding:14px 22px;border-radius:11px;box-shadow:0 10px 24px -12px var(--accent)" style-hover="filter:brightness(1.07);transform:translateY(-1px)"><span style="font-size:.72rem">▶</span>Watch the 3-min demo</a>
+      <a href="https://github.com/indrapranesh/relay-crisis" style="display:inline-flex;align-items:center;gap:8px;background:transparent;color:var(--text);font-weight:600;font-size:.98rem;padding:14px 22px;border-radius:11px;border:1px solid var(--line)" style-hover="border-color:var(--text)">See it on GitHub</a>
+    </div>
+    <p data-reveal style="margin-top:24px;font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--text-2);letter-spacing:.01em">Runs where volunteers already are. AI-optional by design.</p>
+  </div>
+  <div data-herofeed data-reveal style="background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">
+    <div style="display:flex;align-items:center;gap:9px;padding:13px 16px;border-bottom:1px solid var(--line);font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);letter-spacing:.02em">
+      <span data-anim="pulse" style="width:8px;height:8px;border-radius:50%;background:var(--accent);display:inline-block"></span>ledger.events — append-only<span style="margin-left:auto">8 rows</span>
+    </div>
+    <div style="height:250px;overflow:hidden;position:relative">
+      <div data-anim="feed" style="display:flex;flex-direction:column">
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#001</span><span style="color:var(--accent-text);font-weight:500">NeedCreated</span><span style="color:var(--text-2)">riverside · meals ×3</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#002</span><span style="color:var(--accent-text);font-weight:500">TriageConfirmed</span><span style="color:var(--text-2)">severity: critical</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#003</span><span style="color:var(--accent-text);font-weight:500">Assigned</span><span style="color:var(--text-2)">→ volunteer A</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#004</span><span style="color:var(--accent-text);font-weight:500">Nudged</span><span style="color:var(--text-2)">SLA drift +12m</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#005</span><span style="color:var(--accent-text);font-weight:600">Reassigned</span><span style="color:var(--text-2)">→ volunteer B</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#006</span><span style="color:var(--accent-text);font-weight:500">EvidenceAttached</span><span style="color:var(--text-2)">photo · geo</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#007</span><span style="color:var(--ok-text);font-weight:600">Verified</span><span style="color:var(--text-2)">sign-off ✓</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#008</span><span style="color:var(--ok-text);font-weight:600">Closed</span><span style="color:var(--text-2)">need #014 fulfilled</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#001</span><span style="color:var(--accent-text);font-weight:500">NeedCreated</span><span style="color:var(--text-2)">riverside · meals ×3</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#002</span><span style="color:var(--accent-text);font-weight:500">TriageConfirmed</span><span style="color:var(--text-2)">severity: critical</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#003</span><span style="color:var(--accent-text);font-weight:500">Assigned</span><span style="color:var(--text-2)">→ volunteer A</span></div>
+        <div style="display:grid;grid-template-columns:42px 128px 1fr;gap:10px;padding:9px 16px;font-family:'IBM Plex Mono',monospace;font-size:.77rem;border-bottom:1px solid var(--line-2)"><span style="color:var(--text-2)">#004</span><span style="color:var(--accent-text);font-weight:500">Nudged</span><span style="color:var(--text-2)">SLA drift +12m</span></div>
+      </div>
+      <div style="position:absolute;left:0;right:0;top:0;height:36px;background:linear-gradient(var(--surface),transparent);pointer-events:none"></div>
+      <div style="position:absolute;left:0;right:0;bottom:0;height:36px;background:linear-gradient(transparent,var(--surface));pointer-events:none"></div>
+    </div>
+  </div>
+</section>
+
+<section data-screen-label="Problem" style="border-top:1px solid var(--line)">
+  <div style="max-width:1180px;margin:0 auto;padding:clamp(64px,9vw,120px) 24px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.73rem;letter-spacing:.06em;color:var(--text-2)"><span style="color:var(--accent-text)">//</span> the problem</div>
+    <p style="font-family:'Archivo',sans-serif;font-weight:700;font-size:clamp(1.5rem,3vw,2.3rem);line-height:1.18;letter-spacing:-.02em;max-width:22ch;margin:20px 0 0;text-wrap:balance">The same family gets rescued twice while another is missed. Volunteers say “I'll go” and silently drop.</p>
+    <p style="font-family:'Archivo',sans-serif;font-weight:700;font-size:clamp(1.5rem,3vw,2.3rem);line-height:1.18;letter-spacing:-.02em;margin:6px 0 0;color:var(--accent-text)">Every failure is a state-tracking failure.</p>
+
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:22px;margin-top:clamp(36px,5vw,56px)">
+      <div style="flex:1 1 300px;min-width:280px;background:var(--surface-2);border:1px solid var(--line);border-radius:16px;padding:20px;overflow:hidden;position:relative;min-height:230px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-2);margin-bottom:14px">group chat</div>
+        <div style="display:flex;flex-direction:column;gap:9px;filter:blur(1.1px);opacity:.62">
+          <div style="align-self:flex-start;max-width:76%;background:var(--surface);border:1px solid var(--line);border-radius:13px 13px 13px 3px;padding:8px 12px;font-size:.83rem;color:var(--text-2)">anyone near riverside??</div>
+          <div style="align-self:flex-end;max-width:60%;background:var(--surface);border:1px solid var(--line);border-radius:13px 13px 3px 13px;padding:8px 12px;font-size:.83rem;color:var(--text-2)">i can go</div>
+          <div style="align-self:flex-start;max-width:82%;background:var(--surface);border:1px solid var(--line);border-radius:13px 13px 13px 3px;padding:8px 12px;font-size:.83rem;color:var(--text-2);margin-top:-2px">did someone get the Kapoor family?</div>
+          <div style="align-self:flex-end;max-width:44%;background:var(--surface);border:1px solid var(--line);border-radius:13px 13px 3px 13px;padding:8px 12px;font-size:.83rem;color:var(--text-2)">omw</div>
+          <div style="align-self:flex-start;max-width:70%;background:var(--surface);border:1px solid var(--line);border-radius:13px 13px 13px 3px;padding:8px 12px;font-size:.83rem;color:var(--text-2);margin-top:-3px">still need water @ 4th st</div>
+          <div style="align-self:flex-end;max-width:50%;background:var(--surface);border:1px solid var(--line);border-radius:13px 13px 3px 13px;padding:8px 12px;font-size:.83rem;color:var(--text-2)">who's got this??</div>
+        </div>
+        <div style="position:absolute;left:0;right:0;bottom:0;height:64px;background:linear-gradient(transparent,var(--surface-2));pointer-events:none"></div>
+      </div>
+
+      <div style="flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--text-2)">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:.66rem;letter-spacing:.1em;text-transform:uppercase">state engine</span>
+        <span style="font-size:1.5rem;color:var(--accent-text);line-height:1">→</span>
+      </div>
+
+      <div style="flex:1 1 300px;min-width:280px;display:flex;flex-direction:column;gap:10px">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-2);margin-bottom:4px">structured ledger</div>
+        <div style="display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 15px;box-shadow:var(--shadow)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--text-2)">#012</span><span style="font-weight:600;font-size:.92rem;flex:1">Water ×20 · 4th St</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);padding:3px 8px;border-radius:6px">tracked</span></div>
+        <div style="display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 15px;box-shadow:var(--shadow)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--text-2)">#013</span><span style="font-weight:600;font-size:.92rem;flex:1">Medical run · Kapoor</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);padding:3px 8px;border-radius:6px">assigned</span></div>
+        <div style="display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:13px 15px;box-shadow:var(--shadow)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--text-2)">#014</span><span style="font-weight:600;font-size:.92rem;flex:1">Hot meals ×3 · Riverside</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--ok-text);background:var(--ok-soft);border:1px solid color-mix(in srgb,var(--ok) 30%,transparent);padding:3px 8px;border-radius:6px">verified ✓</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="loop" data-screen-label="The loop" style="border-top:1px solid var(--line)">
+  <div style="max-width:1180px;margin:0 auto;padding:clamp(64px,9vw,120px) 24px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.73rem;letter-spacing:.06em;color:var(--text-2)"><span style="color:var(--accent-text)">//</span> the loop</div>
+    <h2 style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(1.8rem,3.4vw,2.7rem);letter-spacing:-.025em;margin:16px 0 0;max-width:20ch;text-wrap:balance">Six verbs. One append-only ledger.</h2>
+    <p style="color:var(--text-2);font-size:clamp(1rem,1.4vw,1.15rem);max-width:60ch;margin:16px 0 0;line-height:1.55">State is the log. Every transition is an appended event — nothing is edited, nothing is deleted. The LLM interprets language; deterministic code controls state; humans confirm every consequential step.</p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:1px;margin-top:clamp(36px,5vw,52px);background:var(--line);border:1px solid var(--line);border-radius:14px;overflow:hidden">
+      <div style="background:var(--bg);padding:22px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2)">01</div><div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin-top:8px">Intake</div><p style="color:var(--text-2);font-size:.86rem;line-height:1.5;margin:8px 0 14px">Any message, any language, becomes a structured need.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--accent-text)">NeedCreated</div></div>
+      <div style="background:var(--bg);padding:22px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2)">02</div><div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin-top:8px">Triage</div><p style="color:var(--text-2);font-size:.86rem;line-height:1.5;margin:8px 0 14px">Extract, dedupe, flag low-confidence for a human.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--accent-text)">TriageConfirmed</div></div>
+      <div style="background:var(--bg);padding:22px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2)">03</div><div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin-top:8px">Match</div><p style="color:var(--text-2);font-size:.86rem;line-height:1.5;margin:8px 0 14px">Score volunteers; a human makes the assignment.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--accent-text)">Assigned</div></div>
+      <div style="background:var(--bg);padding:22px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2)">04</div><div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin-top:8px">Commit</div><p style="color:var(--text-2);font-size:.86rem;line-height:1.5;margin:8px 0 14px">An SLA clock starts, with drift detection watching.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--accent-text)">Nudged · Reassigned</div></div>
+      <div style="background:var(--bg);padding:22px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2)">05</div><div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin-top:8px">Verify</div><p style="color:var(--text-2);font-size:.86rem;line-height:1.5;margin:8px 0 14px">Photo, location, recipient, sign-off. Nothing closes on someone's word.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--accent-text)">EvidenceAttached · Verified</div></div>
+      <div style="background:var(--bg);padding:22px 20px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2)">06</div><div style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin-top:8px">Report</div><p style="color:var(--text-2);font-size:.86rem;line-height:1.5;margin:8px 0 14px">Donor-grade. Every number links to a ledger event.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--accent-text)">Closed</div></div>
+    </div>
+
+    <div style="margin-top:clamp(28px,4vw,44px);background:var(--surface);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:clamp(26px,3.6vw,42px) clamp(22px,3vw,40px)">
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between;font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--text-2)">
+        <span>ledger.events</span>
+        <span style="color:var(--accent-text)">append-only · UPDATE rejected</span>
+      </div>
+      <div data-spine style="position:relative;margin-top:34px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+        <div data-spineline style="position:absolute;left:0;right:0;top:8px;height:2px;background:var(--spine);opacity:.85;z-index:0"></div>
+        <div data-node data-reveal style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px"><span style="width:18px;height:18px;border-radius:50%;background:var(--surface);border:2.5px solid var(--spine);box-shadow:0 0 0 4px var(--surface);flex:0 0 auto"></span><div data-nodec style="display:flex;flex-direction:column;align-items:center;gap:3px"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--text);font-weight:500">NeedCreated</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">riverside</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.64rem;color:var(--text-2);opacity:.7">#001</span></div></div>
+        <div data-node data-reveal style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;animation-delay:.05s"><span style="width:18px;height:18px;border-radius:50%;background:var(--surface);border:2.5px solid var(--spine);box-shadow:0 0 0 4px var(--surface);flex:0 0 auto"></span><div data-nodec style="display:flex;flex-direction:column;align-items:center;gap:3px"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--text);font-weight:500">TriageConfirmed</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">critical</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.64rem;color:var(--text-2);opacity:.7">#002</span></div></div>
+        <div data-node data-reveal style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;animation-delay:.1s"><span style="width:18px;height:18px;border-radius:50%;background:var(--surface);border:2.5px solid var(--spine);box-shadow:0 0 0 4px var(--surface);flex:0 0 auto"></span><div data-nodec style="display:flex;flex-direction:column;align-items:center;gap:3px"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--text);font-weight:500">Assigned</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">→ vol A</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.64rem;color:var(--text-2);opacity:.7">#003</span></div></div>
+        <div data-node data-reveal style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;animation-delay:.15s"><span style="width:18px;height:18px;border-radius:50%;background:var(--surface);border:2.5px solid var(--spine);box-shadow:0 0 0 4px var(--surface);flex:0 0 auto"></span><div data-nodec style="display:flex;flex-direction:column;align-items:center;gap:3px"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--accent-text);font-weight:500">Nudged</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">+12m</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.64rem;color:var(--text-2);opacity:.7">#004</span></div></div>
+        <div data-node data-reveal style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;animation-delay:.2s"><span style="width:18px;height:18px;border-radius:50%;background:var(--accent);border:2.5px solid var(--accent);box-shadow:0 0 0 4px var(--surface);flex:0 0 auto"></span><div data-nodec style="display:flex;flex-direction:column;align-items:center;gap:3px"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--accent-text);font-weight:600">Reassigned</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">→ vol B</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.64rem;color:var(--text-2);opacity:.7">#005</span></div></div>
+        <div data-node data-reveal style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;animation-delay:.25s"><span style="width:18px;height:18px;border-radius:50%;background:var(--surface);border:2.5px solid var(--spine);box-shadow:0 0 0 4px var(--surface);flex:0 0 auto"></span><div data-nodec style="display:flex;flex-direction:column;align-items:center;gap:3px"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--text);font-weight:500">EvidenceAttached</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">photo · geo</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.64rem;color:var(--text-2);opacity:.7">#006</span></div></div>
+        <div data-node data-reveal style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;animation-delay:.3s"><span style="width:18px;height:18px;border-radius:50%;background:var(--ok);border:2.5px solid var(--ok);box-shadow:0 0 0 4px var(--surface);flex:0 0 auto"></span><div data-nodec style="display:flex;flex-direction:column;align-items:center;gap:3px"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--ok-text);font-weight:600">Verified</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">sign-off</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.64rem;color:var(--text-2);opacity:.7">#007</span></div></div>
+        <div data-node data-reveal style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;animation-delay:.35s"><span style="width:18px;height:18px;border-radius:50%;background:var(--ok);border:2.5px solid var(--ok);box-shadow:0 0 0 4px var(--surface);flex:0 0 auto"></span><div data-nodec style="display:flex;flex-direction:column;align-items:center;gap:3px"><span style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--ok-text);font-weight:600">Closed</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">#014</span><span style="font-family:'IBM Plex Mono',monospace;font-size:.64rem;color:var(--text-2);opacity:.7">#008</span></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-screen-label="The moment" style="border-top:1px solid var(--line);background:var(--surface-2)">
+  <div data-grid style="max-width:1180px;margin:0 auto;padding:clamp(64px,9vw,120px) 24px;display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,1fr);gap:clamp(34px,5vw,64px);align-items:center">
+    <div>
+      <div style="font-family:'IBM Plex Mono',monospace;font-size:.73rem;letter-spacing:.06em;color:var(--text-2)"><span style="color:var(--accent-text)">//</span> the moment it earns trust</div>
+      <blockquote style="font-family:'Archivo',sans-serif;font-weight:700;font-size:clamp(1.55rem,3vw,2.35rem);line-height:1.18;letter-spacing:-.02em;margin:20px 0 0;text-wrap:balance">“It caught that the food delivery never actually happened — the volunteer got stuck — and reassigned it before the coordinator even noticed.”</blockquote>
+      <p style="color:var(--text-2);font-size:clamp(1rem,1.4vw,1.12rem);line-height:1.55;margin:20px 0 0;max-width:52ch">Drift detection watches the SLA clock, not the status flag. When a promise stalls, Relay nudges, waits, and reassigns — appending every step to the ledger.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:22px;font-family:'IBM Plex Mono',monospace;font-size:.74rem">
+        <span style="padding:5px 11px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--text-2)">Nudged</span>
+        <span style="color:var(--text-2);align-self:center">→</span>
+        <span style="padding:5px 11px;border:1px solid var(--line);border-radius:7px;background:var(--surface);color:var(--text-2)">no ack</span>
+        <span style="color:var(--text-2);align-self:center">→</span>
+        <span style="padding:5px 11px;border:1px solid color-mix(in srgb,var(--accent) 32%,transparent);border-radius:7px;background:var(--accent-soft);color:var(--accent-text);font-weight:600">Reassigned</span>
+      </div>
+    </div>
+    <div style="background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden">
+      <div style="display:flex;align-items:flex-start;gap:12px;padding:16px 18px;border-bottom:1px solid var(--line)">
+        <div style="flex:1"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2)">Dispatch · Need #014</div><div style="font-weight:700;font-size:1.02rem;margin-top:3px;font-family:'Archivo',sans-serif">Hot meals ×3 · Riverside shelter</div></div>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:.66rem;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-text);background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);padding:4px 9px;border-radius:6px;white-space:nowrap">critical</span>
+      </div>
+      <div>
+        <div style="display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line-2)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--text-2)">09:14</span><div><div style="font-weight:600;font-size:.9rem">Assigned</div><div style="font-size:.8rem;color:var(--text-2)">→ Volunteer A</div></div><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">Assigned</span></div>
+        <div style="display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line-2)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--text-2)">09:26</span><div><div style="font-weight:600;font-size:.9rem">SLA clock started</div><div style="font-size:.8rem;color:var(--text-2)">30 min to deliver</div></div><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">—</span></div>
+        <div data-anim="flare" style="display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line-2);background:var(--accent-soft);box-shadow:inset 3px 0 0 var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--accent-text)">09:41</span><div><div style="font-weight:700;font-size:.9rem;color:var(--accent-text)">Drift detected</div><div style="font-size:.8rem;color:var(--text-2)">no location ping · unresponsive</div></div><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--accent-text)">◉ drift</span></div>
+        <div style="display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line-2)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--text-2)">09:41</span><div><div style="font-weight:600;font-size:.9rem">Auto-nudge sent</div><div style="font-size:.8rem;color:var(--text-2)">“still able to deliver?”</div></div><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">Nudged</span></div>
+        <div style="display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line-2)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--text-2)">09:43</span><div><div style="font-weight:600;font-size:.9rem;color:var(--text-2)">No acknowledgement</div><div style="font-size:.8rem;color:var(--text-2)">timeout</div></div><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">—</span></div>
+        <div style="display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line-2);box-shadow:inset 3px 0 0 var(--accent)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--accent-text)">09:44</span><div><div style="font-weight:700;font-size:.9rem;color:var(--accent-text)">Reassigned</div><div style="font-size:.8rem;color:var(--text-2)">→ Volunteer B · 0.4 mi away</div></div><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--accent-text)">Reassigned</span></div>
+        <div style="display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line-2)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--text-2)">10:02</span><div><div style="font-weight:600;font-size:.9rem">Delivered</div><div style="font-size:.8rem;color:var(--text-2)">photo · geo · recipient</div></div><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--text-2)">EvidenceAttached</span></div>
+        <div style="display:grid;grid-template-columns:52px 1fr auto;gap:12px;align-items:center;padding:11px 16px;box-shadow:inset 3px 0 0 var(--ok)"><span style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--ok-text)">10:03</span><div><div style="font-weight:700;font-size:.9rem;color:var(--ok-text)">Verified ✓</div><div style="font-size:.8rem;color:var(--text-2)">coordinator sign-off</div></div><span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;color:var(--ok-text)">Verified</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="proof" data-screen-label="Proof" style="border-top:1px solid var(--line)">
+  <div style="max-width:1180px;margin:0 auto;padding:clamp(64px,9vw,120px) 24px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.73rem;letter-spacing:.06em;color:var(--text-2)"><span style="color:var(--accent-text)">//</span> proof, not promises</div>
+    <h2 style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(1.8rem,3.4vw,2.7rem);letter-spacing:-.025em;margin:16px 0 0;max-width:22ch;text-wrap:balance">Five things you can verify in the code.</h2>
+    <p style="color:var(--text-2);font-size:clamp(1rem,1.4vw,1.15rem);max-width:58ch;margin:16px 0 0;line-height:1.55">Each claim is enforced by a mechanism, not a marketing page.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:16px;margin-top:clamp(32px,4vw,48px)">
+      <div style="display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px" style-hover="border-color:color-mix(in srgb,var(--accent) 40%,var(--line));transform:translateY(-2px)"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--accent-text)">01</div><h3 style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin:10px 0 0">Append-only ledger</h3><p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:9px 0 16px;flex:1">A database trigger rejects any UPDATE. The audit trail is the product.</p><code style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;display:block">BEFORE UPDATE → RAISE EXCEPTION</code></div>
+      <div style="display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px" style-hover="border-color:color-mix(in srgb,var(--accent) 40%,var(--line));transform:translateY(-2px)"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--accent-text)">02</div><h3 style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin:10px 0 0">Humans in command</h3><p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:9px 0 16px;flex:1">The engine rejects agent or system actors on consequential transitions.</p><code style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;display:block">assertActor(human) · reject(agent)</code></div>
+      <div style="display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px" style-hover="border-color:color-mix(in srgb,var(--accent) 40%,var(--line));transform:translateY(-2px)"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--accent-text)">03</div><h3 style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin:10px 0 0">Numbers are never hallucinated</h3><p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:9px 0 16px;flex:1">Reports render {{stat:*}} tokens; a validator rejects any figure not backed by the ledger. A fabricated number falls back to a deterministic template.</p><code style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;display:block">{{stat:needs_verified}}</code></div>
+      <div style="display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px" style-hover="border-color:color-mix(in srgb,var(--accent) 40%,var(--line));transform:translateY(-2px)"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--accent-text)">04</div><h3 style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin:10px 0 0">PII, minimized</h3><p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:9px 0 16px;flex:1">Beneficiary contact lives only in an AES-256-GCM vault. The LLM never sees it.</p><code style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;display:block">vault.encrypt(aes-256-gcm)</code></div>
+      <div style="display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px" style-hover="border-color:color-mix(in srgb,var(--accent) 40%,var(--line));transform:translateY(-2px)"><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--accent-text)">05</div><h3 style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.16rem;margin:10px 0 0">AI-optional by design</h3><p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:9px 0 16px;flex:1">Unplug the model and the whole loop keeps working on deterministic fallbacks.</p><code style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 11px;display:block">if (!apiKey) useDeterministic()</code></div>
+    </div>
+  </div>
+</section>
+
+<section data-screen-label="Measured" style="border-top:1px solid var(--line);background:var(--surface-2)">
+  <div style="max-width:1180px;margin:0 auto;padding:clamp(64px,9vw,120px) 24px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.73rem;letter-spacing:.06em;color:var(--text-2)"><span style="color:var(--accent-text)">//</span> measured, not claimed</div>
+    <h2 style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(1.8rem,3.4vw,2.7rem);letter-spacing:-.025em;margin:16px 0 0;max-width:22ch;text-wrap:balance">Two numbers, both reproducible.</h2>
+    <div data-grid style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:clamp(32px,4vw,48px)">
+      <div style="background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:clamp(24px,3vw,34px)">
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-2)">extraction quality</div>
+        <div style="display:flex;flex-wrap:wrap;gap:32px;margin-top:22px">
+          <div><div style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(2.6rem,5vw,3.5rem);line-height:1;letter-spacing:-.03em">86.1<span style="font-size:.5em;color:var(--text-2)">%</span></div><div style="color:var(--text-2);font-size:.86rem;margin-top:8px">field accuracy</div></div>
+          <div><div style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(2.6rem,5vw,3.5rem);line-height:1;letter-spacing:-.03em;color:var(--ok-text)">100<span style="font-size:.5em">%</span></div><div style="color:var(--text-2);font-size:.86rem;margin-top:8px">critical-severity recall</div></div>
+        </div>
+        <p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:22px 0 0">On a 40-message labeled set.</p>
+        <code style="font-family:'IBM Plex Mono',monospace;font-size:.74rem;color:var(--text-2);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:9px 12px;display:inline-block;margin-top:14px">reproducible · npm run eval</code>
+      </div>
+      <div style="background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:clamp(24px,3vw,34px)">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;font-weight:600;letter-spacing:.18em;text-transform:uppercase;color:var(--text-2);border:1px dashed var(--text-2);padding:4px 10px;border-radius:6px">Simulated</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--text-2)">48-hour flood · published rules</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:22px">
+          <div style="background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 22%,transparent);border-radius:12px;padding:16px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:.66rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-text);margin-bottom:12px">group-chat baseline</div>
+            <div style="font-size:.86rem;line-height:1.7;color:var(--text)"><strong style="font-family:'Archivo',sans-serif">2</strong> needs left unclaimed<br><strong style="font-family:'Archivo',sans-serif">2</strong> families served twice<br><strong style="font-family:'Archivo',sans-serif">0</strong> deliveries verified</div>
+          </div>
+          <div style="background:var(--ok-soft);border:1px solid color-mix(in srgb,var(--ok) 26%,transparent);border-radius:12px;padding:16px">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:.66rem;letter-spacing:.08em;text-transform:uppercase;color:var(--ok-text);margin-bottom:12px">Relay</div>
+            <div style="font-size:.86rem;line-height:1.7;color:var(--text)"><strong style="font-family:'Archivo',sans-serif">14</strong> tracked<br>repeats deduped<br>delivery verified on a<br>complete evidence packet</div>
+          </div>
+        </div>
+        <p style="color:var(--text-2);font-size:.82rem;line-height:1.5;margin:16px 0 0">Labeled <strong style="color:var(--text)">simulated</strong> on purpose — the honesty is the point.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section data-screen-label="Landscape" style="border-top:1px solid var(--line)">
+  <div style="max-width:1180px;margin:0 auto;padding:clamp(64px,9vw,120px) 24px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.73rem;letter-spacing:.06em;color:var(--text-2)"><span style="color:var(--accent-text)">//</span> what exists today</div>
+    <h2 style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(1.8rem,3.4vw,2.7rem);letter-spacing:-.025em;margin:16px 0 0;max-width:24ch;text-wrap:balance">Everyone solves one edge of this. Relay closes the loop.</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(255px,1fr));gap:16px;margin-top:clamp(32px,4vw,48px)">
+      <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px"><div style="font-weight:700;font-family:'Archivo',sans-serif;font-size:1.1rem">Crisis mapping</div><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);margin-top:5px">Ushahidi · Sahana</div><p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:14px 0 16px">Web crisis-mapping that lives outside the chat. No promise-tracking.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--text-2);border-top:1px solid var(--line-2);padding-top:12px">gap: outside the conversation</div></div>
+      <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px"><div style="font-weight:700;font-family:'Archivo',sans-serif;font-size:1.1rem">Group chats</div><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);margin-top:5px">WhatsApp groups</div><p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:14px 0 16px">Where coordination actually happens — with zero structure and no accountability.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--text-2);border-top:1px solid var(--line-2);padding-top:12px">gap: no structure</div></div>
+      <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px"><div style="font-weight:700;font-family:'Archivo',sans-serif;font-size:1.1rem">Incident tooling</div><div style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2);margin-top:5px">Slack tools · incident.io</div><p style="color:var(--text-2);font-size:.9rem;line-height:1.5;margin:14px 0 16px">Built for internal IT. Closes on status flags, not verified fulfillment.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.7rem;color:var(--text-2);border-top:1px solid var(--line-2);padding-top:12px">gap: flags, not proof</div></div>
+    </div>
+    <div style="margin-top:16px;display:flex;align-items:flex-start;gap:16px;background:var(--surface);border:1px solid color-mix(in srgb,var(--accent) 34%,var(--line));border-left:3px solid var(--accent);border-radius:14px;padding:clamp(20px,2.6vw,28px)">
+      <span style="font-family:'Archivo',sans-serif;font-weight:800;font-size:1.1rem;color:var(--text)">Relay<span style="color:var(--accent)">.</span></span>
+      <p style="font-family:'Archivo',sans-serif;font-weight:600;font-size:clamp(1.05rem,1.9vw,1.4rem);line-height:1.35;letter-spacing:-.01em;margin:0;flex:1;text-wrap:balance">Coordination inside the conversation <span style="color:var(--text-2)">+</span> promises with proof <span style="color:var(--text-2)">+</span> donor-grade accountability.</p>
+    </div>
+  </div>
+</section>
+
+<section id="platform" data-screen-label="Platform" style="border-top:1px solid var(--line);background:var(--surface-2)">
+  <div style="max-width:1180px;margin:0 auto;padding:clamp(64px,9vw,120px) 24px">
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.73rem;letter-spacing:.06em;color:var(--text-2)"><span style="color:var(--accent-text)">//</span> built on the Slack platform</div>
+    <h2 style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(1.8rem,3.4vw,2.7rem);letter-spacing:-.025em;margin:16px 0 0;max-width:22ch;text-wrap:balance">Three platform capabilities, used honestly.</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(275px,1fr));gap:16px;margin-top:clamp(32px,4vw,48px)">
+      <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-text)">capability 01</div><h3 style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.2rem;margin:11px 0 0">Slack AI capabilities</h3><p style="color:var(--text-2);font-size:.9rem;line-height:1.55;margin:10px 0 0">Powers the Ask-Relay assistant — natural-language questions answered from the ledger.</p></div>
+      <div style="background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:24px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-text)">capability 02</div><h3 style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.2rem;margin:11px 0 0">Real-Time Search API</h3><p style="color:var(--text-2);font-size:.9rem;line-height:1.55;margin:10px 0 0">Permission-aware field-context grounding — answers respect who is allowed to see what.</p></div>
+      <div style="background:var(--surface);border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line));border-radius:14px;padding:24px"><div style="font-family:'IBM Plex Mono',monospace;font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-text)">capability 03</div><h3 style="font-family:'Archivo',sans-serif;font-weight:700;font-size:1.2rem;margin:11px 0 0">MCP</h3><p style="color:var(--text-2);font-size:.9rem;line-height:1.55;margin:10px 0 12px">Relay is exposed as a read-only MCP server. An external agent can even file an accountable pledge through it.</p><div style="font-family:'IBM Plex Mono',monospace;font-size:.76rem;color:var(--accent-text);font-weight:500;border-top:1px solid var(--line-2);padding-top:12px">Relay holds AI agents accountable too.</div></div>
+    </div>
+    <p style="font-family:'IBM Plex Mono',monospace;font-size:.8rem;color:var(--text-2);margin:22px 0 0;line-height:1.6">Every AI feature degrades to a deterministic fallback with no key. The loop never depends on the model.</p>
+  </div>
+</section>
+
+<section data-screen-label="Footer CTA" style="border-top:1px solid var(--line)">
+  <div style="max-width:920px;margin:0 auto;padding:clamp(72px,10vw,132px) 24px;text-align:center">
+    <h2 style="font-family:'Archivo',sans-serif;font-weight:800;font-size:clamp(2rem,4.4vw,3.4rem);letter-spacing:-.03em;margin:0;text-wrap:balance">Don't trust our report — audit it.</h2>
+    <div style="display:flex;flex-wrap:wrap;justify-content:center;gap:12px;margin-top:32px">
+      <a href="https://github.com/indrapranesh/relay-crisis" style="display:inline-flex;align-items:center;gap:9px;background:var(--accent);color:#fff;font-weight:600;font-size:.98rem;padding:14px 22px;border-radius:11px;box-shadow:0 10px 24px -12px var(--accent)" style-hover="filter:brightness(1.07);transform:translateY(-1px)"><span style="font-size:.72rem">▶</span>Watch the demo</a>
+      <a href="https://github.com/indrapranesh/relay-crisis" style="display:inline-flex;align-items:center;gap:8px;background:transparent;color:var(--text);font-weight:600;font-size:.98rem;padding:14px 22px;border-radius:11px;border:1px solid var(--line)" style-hover="border-color:var(--text)">Read the code</a>
+      <a href="https://github.com/indrapranesh/relay-crisis" style="display:inline-flex;align-items:center;gap:8px;background:transparent;color:var(--text);font-weight:600;font-size:.98rem;padding:14px 22px;border-radius:11px;border:1px solid var(--line)" style-hover="border-color:var(--text)">Try the live sandbox</a>
+    </div>
+    <div style="font-family:'IBM Plex Mono',monospace;font-size:.8rem;color:var(--text-2);margin-top:30px">538 hermetic + 17 integration tests · deployed on Fly</div>
+    <p style="color:var(--text-2);font-size:.85rem;line-height:1.6;max-width:56ch;margin:16px auto 0">All demo data is fictional. Relay assists volunteer coordinators; it is not an emergency service.</p>
+  </div>
+  <div style="border-top:1px solid var(--line)">
+    <div style="max-width:1180px;margin:0 auto;padding:22px 24px;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between">
+      <span style="font-family:'Archivo',sans-serif;font-weight:800;font-size:1.1rem;color:var(--text)">Relay<span style="color:var(--accent)">.</span></span>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--text-2)">Agent for Good · Slack Agent Builder Challenge</span>
+    </div>
+  </div>
+</section>
+
+<script>
+  (function(){var r=document.documentElement;try{var s=localStorage.getItem('relay-theme');if(s==='light'||s==='dark')r.setAttribute('data-theme',s);}catch(e){}})();
+  function relayToggleTheme(){var r=document.documentElement;var cur=r.getAttribute('data-theme')==='dark'?'dark':'light';var next=cur==='dark'?'light':'dark';r.setAttribute('data-theme',next);try{localStorage.setItem('relay-theme',next);}catch(e){}}
+</script>
+
+</body>
+</html>
