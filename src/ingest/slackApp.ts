@@ -353,7 +353,8 @@ function landingPage(): string {
   try {
     landingPageCache = readFileSync('public/index.html', 'utf8');
   } catch {
-    landingPageCache = '<!doctype html><title>Relay</title><h1>Relay — crisis coordination inside Slack</h1><p>See <a href="https://github.com/indrapranesh/relay-crisis">the repo</a>.</p>';
+    landingPageCache =
+      '<!doctype html><title>Relay</title><h1>Relay — crisis coordination inside Slack</h1><p>See <a href="https://github.com/indrapranesh/relay-crisis">the repo</a>.</p>';
   }
   return landingPageCache;
 }
