@@ -369,7 +369,7 @@ Judges evaluate dozens of projects July 14–Aug 6. Most sandboxes they enter wi
 
 ### 13.3 Testing-instructions text (paste into Devpost, adjust links)
 
-> 1. Accept the Slack workspace invite (sent to slackhack@salesforce.com / testing@devpost.com). 2. Open `#judges-start-here` and press **▶ Run flood demo** — a simulated 48-hour flood response plays out in ~4 minutes across `#relay-intake` → `#relay-dispatch` → `#relay-volunteers` → `#relay-hq`. 3. Open the **Relay** App Home for the live operations board. 4. Try the assistant: ask *"Any critical needs still open?"* 5. Run `/relay sitrep` and `/relay report`. 6. Press **↺ Reset** to replay. All data is fictional; SLA timers are compressed for demo purposes. Architecture, eval numbers, and code: ⟨repo link⟩.
+> 1. Accept the Slack workspace invite (sent to slackhack@salesforce.com / testing@devpost.com). 2. Open `#judges-start-here` and press **▶ Run flood demo** — a simulated 48-hour flood response plays out in ~4 minutes across `#relay-intake` → `#relay-dispatch` → `#relay-volunteers` → `#relay-hq`. 3. Open the **Relay** App Home for the live operations board. 4. Try the assistant: ask *"Any critical needs still open?"* 5. Run `/relay sitrep` and `/relay report`. 6. Press **↺ Reset** to replay. All data is fictional; SLA timers are compressed for demo purposes. Architecture, eval numbers, and code: https://github.com/indrapranesh/relay-crisis.
 
 ---
 

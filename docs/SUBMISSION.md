@@ -1,6 +1,6 @@
 # Relay — Devpost submission
 
-> Ready-to-paste description. Replace ⟨video URL⟩, ⟨sandbox URL⟩, ⟨repo⟩ before submitting.
+> Ready-to-paste description. Replace ⟨video URL⟩ and ⟨sandbox URL⟩ before submitting.
 > **Track: Slack Agent for Good.** All data in the demo is fictional. Relay assists volunteer coordinators; it is not an emergency service.
 
 **Relay — verified crisis coordination inside Slack. Every need tracked, every promise proven.**
@@ -35,9 +35,9 @@ Relay uses **all three**, each with a real job.
 - **Humans in command.** Confirm, assign, merge, sign-off, and close all require a human actor; the engine rejects agent/system actors on those transitions rather than trusting the caller. Dedupe auto-*detects* duplicates but the merge itself is a human click.
 - **Numbers are never hallucinated.** Sitreps and reports render immutable `{{stat:*}}` tokens computed from the ledger; a validator rejects any digit in the narrative not backed by a stat, regenerating twice before falling back to a deterministic template. Proven: a fabricated figure fed by a mock model never reaches the output.
 - **PII minimized by construction.** Beneficiary contact lives only in an AES-256-GCM `contact_vault`; the ledger and every LLM input are zero-copy. A reveal writes an `audit_log` row. The donor report grep-verifies zero seeded phone numbers in its output.
-- **Measured, reproducible quality.** On a 40-message labelled set (`npm run eval`): **86.1% field-level extraction accuracy, 100% critical-severity recall, 100% contact/locality accuracy.** Separately, `npm run load` replays the flood's intake through the in-memory pipeline and reports **intake p95 ≈ 0.13 ms at ~9,000 msg/s** — a *local/hermetic* engine measurement (no Slack/DB/Redis), explicitly not a production SLA.
+- **Measured, reproducible quality.** On a 40-message labelled set (`npm run eval`): **86.1% field-level extraction accuracy, 100% critical-severity recall, 100% contact/locality accuracy.** Separately, `npm run load` replays the flood's intake through the in-memory pipeline and reports **intake p95 in the low fractions of a millisecond (≈0.1–0.2 ms) at several thousand msg/s** — a *local/hermetic* engine measurement (no Slack/DB/Redis) that varies run-to-run, explicitly not a production SLA.
 - **Provider-agnostic LLM.** Claude or OpenAI via one env var; forced tool-use + Zod at the boundary. **Every AI feature falls back to a deterministic extractor/template with no key**, so the whole product — and the offline demo — runs with zero configuration.
-- **Tested.** 436 hermetic unit tests (zero infra) + 17 Postgres integration tests. TypeScript strict, event-correlated structured logs.
+- **Tested.** 538 hermetic unit tests (zero infra) + 17 Postgres integration tests. TypeScript strict, event-correlated structured logs.
 - **Hosting: Fly.io** — an always-on Docker machine + self-hosted Postgres + Upstash Redis, with auto-HTTPS on `*.fly.dev`. One machine is pinned up so the SLA drift tick and scheduler never sleep and the demo never cold-starts; a deep `/healthz` probe (real pg query + Redis PING) gates rotation, and schema migrations run on boot. The whole product still runs **fully hermetically with zero infra** for `npm test` and the offline demo.
 
 ## Design
@@ -83,4 +83,4 @@ Relay is a new project created during the submission period (first commit dated 
 5. Run `/relay sitrep` and `/relay report`.
 6. Press **↺ Reset** to replay.
 
-All data is fictional; SLA timers are compressed for the demo. Video: ⟨video URL⟩ · Code, architecture, and eval: ⟨repo⟩.
+All data is fictional; SLA timers are compressed for the demo. Video: ⟨video URL⟩ · Code, architecture, and eval: https://github.com/indrapranesh/relay-crisis.

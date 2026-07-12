@@ -14,7 +14,7 @@ Crisis coordination tools exist, but none close the loop *inside the conversatio
 
 On a 40-message labelled set (`npm run eval`, reproducible with no API key via the deterministic baseline): **86.1% field-level accuracy · 100% critical-severity recall · 100% contact/locality accuracy.** These are the only extraction-quality numbers we publish — the product's ethos forbids invented impact statistics.
 
-**Measured intake throughput (local/hermetic).** `npm run load` replays the frozen flood's 14 intake messages through the in-memory pipeline (heuristic extraction, no Slack/DB/Redis), 25×. On this machine: **intake p95 ≈ 0.13 ms, ~9,000 msg/s** — a *local, in-memory engine* measurement (reproduce with `npm run load`; exact figures are machine-dependent), never a production or Slack-round-trip SLA.
+**Measured intake throughput (local/hermetic).** `npm run load` replays the frozen flood's 14 intake messages through the in-memory pipeline (heuristic extraction, no Slack/DB/Redis), 25×. On this machine: **intake p95 ≈ 0.1–0.2 ms, several thousand msg/s** — a *local, in-memory engine* measurement (reproduce with `npm run load`; exact figures vary run-to-run and are machine-dependent), never a production or Slack-round-trip SLA.
 
 ## 60-second local setup
 
