@@ -86,4 +86,4 @@ Relay is a new project created during the submission period (first commit dated 
 5. Run `/relay sitrep` and `/relay report`.
 6. Press **↺ Reset** to replay.
 
-All data is fictional; SLA timers are compressed for the demo. Video: ⟨video URL⟩ · Code, architecture, and eval: https://github.com/indrapranesh/relay-crisis.
+All data is fictional; SLA timers are compressed for the demo. Video: ⟨video URL⟩ · Code, architecture, and eval: https://github.com/kaviyakumar23/relay.
