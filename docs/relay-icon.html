@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Relay — app icon</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { background: #fff; }
+  .icon {
+    width: 1024px; height: 1024px; position: relative; overflow: hidden;
+    background:
+      radial-gradient(130% 120% at 32% 22%, #DA3A3F 0%, #C1272D 46%, #9E1D22 100%);
+    display: flex; align-items: center; justify-content: center;
+    font-family: ui-sans-serif, -apple-system, "Helvetica Neue", "Segoe UI", Arial, sans-serif;
+  }
+  /* subtle top-light + bottom-shade for depth */
+  .icon::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(90% 70% at 50% 8%, rgba(255,255,255,.14), rgba(255,255,255,0) 60%);
+  }
+  .mark { position: relative; display: inline-flex; align-items: flex-end; }
+  .r {
+    color: #FBFAF7; font-weight: 800; font-size: 670px;
+    letter-spacing: -20px; line-height: 0.82;
+    text-shadow: 0 10px 40px rgba(88,10,12,.28);
+  }
+  .dot {
+    width: 108px; height: 108px; border-radius: 50%;
+    background: #FBFAF7; margin-left: 40px; margin-bottom: 34px;
+    box-shadow: 0 8px 26px rgba(88,10,12,.30);
+  }
+</style>
+</head>
+<body>
+  <div class="icon"><div class="mark"><span class="r">R</span><span class="dot"></span></div></div>
+</body>
+</html>

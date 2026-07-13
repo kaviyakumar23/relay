@@ -26,8 +26,8 @@ features:
   slash_commands:
     - command: /relay
       url: https://relay-crisis.fly.dev/slack/events
-      description: sitrep · report · need · volunteer · demo
-      usage_hint: "sitrep | report | need | volunteer | demo start flood-1"
+      description: sitrep · report · volunteer · volunteers · demo
+      usage_hint: "sitrep | report | volunteer | volunteers | demo start flood-1"
       should_escape: false
 # Scope/event audit 2026-07-07: reconciled against actual call sites + registered
 # handlers. REMOVED app_mentions:read (no app_mention handler), reactions:read +
@@ -54,6 +54,14 @@ oauth_config:
       - im:read
       - im:write
       - users:read
+    # User-token scope for the Real-Time Search API (assistant.search.context).
+    # search:read.public lets Ask-Relay ground answers in live public-channel context on
+    # behalf of the authenticated user; the user-token path needs no action_token. Keep this
+    # to search:read.* only — do NOT add user-token *:history scopes (RTS rule: they conflict
+    # with the message.* bot events above). Semantic search needs a Slack AI Search plan; the
+    # sandbox falls back to keyword, which assistant.search.info detects.
+    user:
+      - search:read.public
 settings:
   event_subscriptions:
     request_url: https://relay-crisis.fly.dev/slack/events

@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Relay — listing previews</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FBFAF7;--surface:#FFFFFF;--surface2:#F4F1EA;--ink:#16202B;--slate:#5C6B78;
+    --line:#E4E0D7;--line2:#EFEBE2;--red:#C1272D;--red-soft:#FBEBEA;--green:#2E7D5B;--green-soft:#E7F2EC;--amber:#B9791C;--amber-soft:#FaF0DB;
+    --side:#20222A;--side2:#2A2D37;--side-txt:#C9CDD6;--side-mut:#8A8F9C;--side-active:#C1272D;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Public Sans',system-ui,-apple-system,Arial,sans-serif;background:#0c0f13;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  .mono{font-family:'IBM Plex Mono',monospace}
+  .slide{display:none}
+  .slide:target{display:flex}
+  .slide{width:1600px;height:1000px;flex-direction:column;overflow:hidden;background:var(--paper)}
+  /* caption band */
+  .cap{height:118px;flex:0 0 auto;background:radial-gradient(130% 150% at 16% 8%,#D8393F,#C1272D 52%,#9E1D22);color:#fff;display:flex;align-items:center;gap:18px;padding:0 46px}
+  .cap .ic{width:52px;height:52px;border-radius:13px;background:rgba(255,255,255,.14);display:flex;align-items:center;justify-content:center;font-family:'Archivo';font-weight:800;font-size:1.6rem;flex:0 0 auto}
+  .cap .ic .d{color:#fff;opacity:.85}
+  .cap h2{font-family:'Archivo';font-weight:800;font-size:2rem;letter-spacing:-.02em;line-height:1.05}
+  .cap p{font-size:1.02rem;opacity:.9;margin-top:3px;font-weight:500}
+  .cap .ey{margin-left:auto;font-family:'IBM Plex Mono';font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;opacity:.82;text-align:right;line-height:1.7}
+  /* slack window */
+  .win{flex:1;display:flex;min-height:0}
+  .side{width:264px;flex:0 0 auto;background:var(--side);color:var(--side-txt);display:flex;flex-direction:column;padding:16px 0}
+  .side .ws{display:flex;align-items:center;gap:11px;padding:4px 18px 16px;border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:12px}
+  .side .ws .b{width:34px;height:34px;border-radius:9px;background:var(--red);display:flex;align-items:center;justify-content:center;font-family:'Archivo';font-weight:800;color:#fff;font-size:1.1rem;flex:0 0 auto}
+  .side .ws .n{font-family:'Archivo';font-weight:700;font-size:1.02rem;color:#fff;line-height:1.1}
+  .side .ws .n small{display:block;font-family:'Public Sans';font-weight:400;font-size:.72rem;color:var(--side-mut)}
+  .side .sec{font-size:.78rem;color:var(--side-mut);padding:14px 18px 5px;font-weight:600}
+  .side .ch{display:flex;align-items:center;gap:9px;padding:6px 18px;font-size:.95rem;color:var(--side-txt)}
+  .side .ch .h{color:var(--side-mut)}
+  .side .ch.act{background:var(--side-active);color:#fff;font-weight:600;border-radius:0}
+  .side .ch.act .h{color:rgba(255,255,255,.8)}
+  .side .ch.app{gap:10px}
+  .side .ch.app .ai{width:20px;height:20px;border-radius:5px;background:var(--red);display:flex;align-items:center;justify-content:center;font-family:'Archivo';font-weight:800;font-size:.66rem;color:#fff}
+  .side .badge{margin-left:auto;background:var(--red);color:#fff;font-size:.66rem;font-weight:700;border-radius:10px;padding:1px 7px}
+  /* main */
+  .main{flex:1;background:var(--paper);display:flex;flex-direction:column;min-width:0}
+  .chead{flex:0 0 auto;border-bottom:1px solid var(--line);padding:15px 26px;display:flex;align-items:center;gap:12px}
+  .chead .t{font-family:'Archivo';font-weight:800;font-size:1.15rem;color:var(--ink);display:flex;align-items:center;gap:6px}
+  .chead .t .h{color:var(--slate)}
+  .chead .topic{color:var(--slate);font-size:.9rem;border-left:1px solid var(--line);padding-left:12px;margin-left:4px}
+  .chead .mem{margin-left:auto;color:var(--slate);font-size:.85rem;display:flex;align-items:center;gap:6px}
+  .conv{flex:1;padding:22px 26px;display:flex;flex-direction:column;gap:18px;overflow:hidden}
+  /* a message row */
+  .msg{display:flex;gap:13px}
+  .av{width:40px;height:40px;border-radius:10px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff;font-size:.92rem;font-family:'Archivo'}
+  .msg .body{flex:1;min-width:0}
+  .msg .hd{display:flex;align-items:baseline;gap:9px}
+  .msg .hd .nm{font-weight:700;color:var(--ink);font-size:.98rem}
+  .msg .hd .app{background:var(--surface2);color:var(--slate);font-size:.62rem;font-weight:700;letter-spacing:.04em;border:1px solid var(--line);border-radius:4px;padding:1px 5px;text-transform:uppercase}
+  .msg .hd .tm{color:var(--slate);font-size:.78rem}
+  .msg .txt{color:var(--ink);font-size:.96rem;margin-top:3px;line-height:1.5}
+  .msg .txt .q{color:var(--slate)}
+  /* relay card (block kit-ish) */
+  .card{margin-top:10px;background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--red);border-radius:12px;box-shadow:0 1px 2px rgba(22,32,43,.04),0 14px 32px -22px rgba(22,32,43,.3);overflow:hidden;max-width:760px}
+  .card.g{border-left-color:var(--green)}
+  .card .top{display:flex;align-items:flex-start;gap:12px;padding:16px 18px 12px}
+  .card .top .h4{font-family:'Archivo';font-weight:800;font-size:1.12rem;color:var(--ink)}
+  .card .top .sub{font-family:'IBM Plex Mono';font-size:.74rem;color:var(--slate);margin-bottom:3px}
+  .pill{font-family:'IBM Plex Mono';font-size:.68rem;font-weight:700;letter-spacing:.05em;text-transform:uppercase;padding:4px 9px;border-radius:6px;white-space:nowrap}
+  .pill.red{color:var(--red);background:var(--red-soft);border:1px solid color-mix(in srgb,var(--red) 28%,transparent)}
+  .pill.grn{color:var(--green);background:var(--green-soft);border:1px solid color-mix(in srgb,var(--green) 30%,transparent)}
+  .pill.amb{color:var(--amber);background:var(--amber-soft);border:1px solid color-mix(in srgb,var(--amber) 30%,transparent)}
+  .fields{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line2);border-top:1px solid var(--line2);border-bottom:1px solid var(--line2)}
+  .fields .f{background:var(--surface);padding:11px 18px}
+  .fields .f .k{font-family:'IBM Plex Mono';font-size:.68rem;color:var(--slate);text-transform:uppercase;letter-spacing:.05em}
+  .fields .f .v{font-weight:600;color:var(--ink);font-size:.96rem;margin-top:2px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .chip{font-family:'IBM Plex Mono';font-size:.62rem;font-weight:600;padding:2px 6px;border-radius:5px;text-transform:uppercase;letter-spacing:.03em}
+  .chip.st{color:var(--green);background:var(--green-soft)}
+  .chip.inf{color:var(--amber);background:var(--amber-soft)}
+  .chip.unk{color:var(--slate);background:var(--surface2)}
+  .quote{padding:12px 18px;color:var(--slate);font-size:.9rem;font-style:italic;border-bottom:1px solid var(--line2)}
+  .btns{display:flex;gap:9px;padding:13px 18px;flex-wrap:wrap}
+  .btn{font-weight:600;font-size:.88rem;padding:9px 15px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+  .btn.pri{background:var(--red);color:#fff;border-color:var(--red)}
+  .btn.ok{background:var(--green);color:#fff;border-color:var(--green)}
+  /* timeline rows */
+  .tl{border-top:1px solid var(--line2)}
+  .tl .r{display:grid;grid-template-columns:64px 1fr auto;gap:14px;align-items:center;padding:11px 18px;border-bottom:1px solid var(--line2)}
+  .tl .r .tm{font-family:'IBM Plex Mono';font-size:.78rem;color:var(--slate)}
+  .tl .r .lb{font-weight:600;font-size:.92rem;color:var(--ink)}
+  .tl .r .d{font-size:.82rem;color:var(--slate)}
+  .tl .r .ev{font-family:'IBM Plex Mono';font-size:.72rem;color:var(--slate)}
+  .tl .r.flare{background:var(--red-soft);box-shadow:inset 4px 0 0 var(--red)}
+  .tl .r.flare .lb,.tl .r.flare .tm,.tl .r.flare .ev{color:var(--red)}
+  .tl .r.rea{box-shadow:inset 4px 0 0 var(--red)}
+  .tl .r.rea .lb,.tl .r.rea .ev{color:var(--red)}
+  .tl .r.ver{box-shadow:inset 4px 0 0 var(--green)}
+  .tl .r.ver .lb,.tl .r.ver .tm,.tl .r.ver .ev{color:var(--green)}
+  /* app home */
+  .home{flex:1;background:var(--paper);padding:26px 30px;overflow:hidden}
+  .home .ht{font-family:'Archivo';font-weight:800;font-size:1.5rem;color:var(--ink);display:flex;align-items:center;gap:11px}
+  .home .ht .ai{width:30px;height:30px;border-radius:8px;background:var(--red);display:flex;align-items:center;justify-content:center;font-family:'Archivo';font-weight:800;color:#fff;font-size:.95rem}
+  .home .subt{color:var(--slate);font-size:.92rem;margin:4px 0 0 41px}
+  .counts{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:22px}
+  .counts .c{background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:16px 18px}
+  .counts .c .n{font-family:'Archivo';font-weight:800;font-size:2.1rem;letter-spacing:-.02em;line-height:1}
+  .counts .c .l{color:var(--slate);font-size:.82rem;margin-top:7px}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;margin-top:16px;overflow:hidden}
+  .panel .ph{font-family:'IBM Plex Mono';font-size:.74rem;letter-spacing:.06em;text-transform:uppercase;color:var(--slate);padding:14px 20px;border-bottom:1px solid var(--line2);display:flex;align-items:center;gap:8px}
+  .row{display:grid;grid-template-columns:26px 1fr auto auto;gap:14px;align-items:center;padding:13px 20px;border-bottom:1px solid var(--line2)}
+  .row:last-child{border-bottom:0}
+  .row .sv{width:12px;height:12px;border-radius:50%}
+  .row .ti{font-weight:600;color:var(--ink);font-size:.98rem}
+  .row .ti small{display:block;font-weight:400;color:var(--slate);font-size:.82rem;margin-top:1px}
+  .row .st{font-family:'IBM Plex Mono';font-size:.72rem;color:var(--slate);background:var(--surface2);border:1px solid var(--line);border-radius:6px;padding:3px 9px}
+  .row .btn{padding:7px 13px;font-size:.82rem}
+  /* checklist / evidence */
+  .check{padding:6px 18px 14px}
+  .check .ci{display:flex;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line2)}
+  .check .ci:last-child{border-bottom:0}
+  .check .bx{width:24px;height:24px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:.9rem;font-weight:700;flex:0 0 auto}
+  .check .bx.on{background:var(--green);color:#fff}
+  .check .bx.off{background:var(--surface2);border:1.5px dashed var(--slate);color:var(--slate)}
+  .check .cl{font-weight:600;color:var(--ink);font-size:.95rem}
+  .check .cl small{display:block;font-weight:400;color:var(--slate);font-size:.82rem}
+  .note{margin:0 18px 14px;background:var(--red-soft);border:1px solid color-mix(in srgb,var(--red) 22%,transparent);border-radius:9px;padding:10px 13px;color:var(--red);font-size:.86rem;font-weight:500}
+  .note.g{background:var(--green-soft);border-color:color-mix(in srgb,var(--green) 26%,transparent);color:var(--green)}
+  /* assistant */
+  .foot{margin-top:auto;padding:10px 18px 14px;border-top:1px solid var(--line2);font-family:'IBM Plex Mono';font-size:.76rem;color:var(--slate)}
+  .cite{color:var(--red);text-decoration:underline}
+</style>
+</head>
+<body>
+
+<!-- ================= S1 · Dispatch card ================= -->
+<section id="s1" class="slide">
+  <div class="cap"><div class="ic">R<span class="d">.</span></div><div><h2>A panicked message becomes a structured need.</h2><p>Relay labels what was stated, what it inferred, and what it still doesn't know.</p></div><div class="ey">Relay · dispatch card<br>Slack Agent for Good</div></div>
+  <div class="win">
+    <div class="side">
+      <div class="ws"><div class="b">C</div><div class="n">Chennai Flood Relief<small>relief.slack.com</small></div></div>
+      <div class="sec">Channels</div>
+      <div class="ch"><span class="h">#</span>relay-intake</div>
+      <div class="ch act"><span class="h">#</span>relay-dispatch</div>
+      <div class="ch"><span class="h">#</span>relay-volunteers</div>
+      <div class="ch"><span class="h">#</span>relay-hq</div>
+      <div class="ch"><span class="h">#</span>relay-judges</div>
+      <div class="sec">Apps</div>
+      <div class="ch app"><span class="ai">R.</span>Relay</div>
+    </div>
+    <div class="main">
+      <div class="chead"><div class="t"><span class="h">#</span>relay-dispatch</div><div class="topic">Confirmed needs, ready to assign</div><div class="mem">👥 9</div></div>
+      <div class="conv">
+        <div class="msg"><div class="av" style="background:var(--red)">R.</div><div class="body"><div class="hd"><span class="nm">Relay</span><span class="app">App</span><span class="tm">9:14 AM</span></div><div class="txt">New need triaged from <b>#relay-intake</b> — please confirm before it's assigned.</div>
+          <div class="card">
+            <div class="top"><div style="flex:1"><div class="sub">Need N-0142 · from @Meera S.</div><div class="h4">Hot meals ×3 · Velachery terrace</div></div><span class="pill red">🔴 critical</span></div>
+            <div class="fields">
+              <div class="f"><div class="k">Type</div><div class="v">Food <span class="chip st">stated</span></div></div>
+              <div class="f"><div class="k">Severity</div><div class="v">Critical <span class="chip inf">inferred · "elderly, stranded"</span></div></div>
+              <div class="f"><div class="k">Location</div><div class="v">Velachery <span class="chip st">stated</span></div></div>
+              <div class="f"><div class="k">People</div><div class="v">3 families <span class="chip unk">headcount unknown</span></div></div>
+            </div>
+            <div class="quote">“3 families on a terrace in Velachery, romba neram aachu — food venum, urgent 🙏”</div>
+            <div class="btns"><span class="btn pri">Confirm</span><span class="btn">Assign…</span><span class="btn">🔒 Reveal contact</span><span class="btn">Edit</span></div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= S2 · Drift → reassign ================= -->
+<section id="s2" class="slide">
+  <div class="cap"><div class="ic">R<span class="d">.</span></div><div><h2>Drift caught and rerouted — before the coordinator noticed.</h2><p>Relay watches the SLA clock, not the status flag. A stalled promise is reassigned automatically.</p></div><div class="ey">Relay · obligation timeline<br>the hero moment</div></div>
+  <div class="win">
+    <div class="side">
+      <div class="ws"><div class="b">C</div><div class="n">Chennai Flood Relief<small>relief.slack.com</small></div></div>
+      <div class="sec">Channels</div>
+      <div class="ch"><span class="h">#</span>relay-intake</div>
+      <div class="ch act"><span class="h">#</span>relay-dispatch</div>
+      <div class="ch"><span class="h">#</span>relay-volunteers</div>
+      <div class="ch"><span class="h">#</span>relay-hq</div>
+      <div class="ch"><span class="h">#</span>relay-judges</div>
+      <div class="sec">Apps</div>
+      <div class="ch app"><span class="ai">R.</span>Relay</div>
+    </div>
+    <div class="main">
+      <div class="chead"><div class="t"><span class="h">#</span>relay-dispatch</div><div class="topic">Need N-0142 · live obligation</div><div class="mem">👥 9</div></div>
+      <div class="conv">
+        <div class="msg"><div class="av" style="background:var(--red)">R.</div><div class="body"><div class="hd"><span class="nm">Relay</span><span class="app">App</span><span class="tm">9:44 AM</span></div><div class="txt">Obligation for <b>Hot meals ×3 · Velachery</b> drifted and was reassigned. Every step is on the ledger.</div>
+          <div class="card">
+            <div class="top"><div style="flex:1"><div class="sub">Need N-0142 · Hot meals ×3 · Velachery</div><div class="h4">Delivered &amp; verified in 49 min</div></div><span class="pill grn">verified ✓</span></div>
+            <div class="tl">
+              <div class="r"><div class="tm">09:14</div><div><div class="lb">Assigned → Arjun K.</div><div class="d">SLA clock started · 30 min to deliver</div></div><div class="ev">Assigned</div></div>
+              <div class="r flare"><div class="tm">09:41</div><div><div class="lb">Drift detected</div><div class="d">no location ping · unresponsive</div></div><div class="ev">◉ drift</div></div>
+              <div class="r"><div class="tm">09:41</div><div><div class="lb">Auto-nudge sent</div><div class="d">“still able to deliver?”</div></div><div class="ev">Nudged</div></div>
+              <div class="r"><div class="tm">09:43</div><div><div class="lb" style="color:var(--slate)">No acknowledgement</div><div class="d">timeout</div></div><div class="ev">—</div></div>
+              <div class="r rea"><div class="tm">09:44</div><div><div class="lb">Reassigned → Priya R.</div><div class="d">0.4 mi away · pre-warmed backup</div></div><div class="ev">Reassigned</div></div>
+              <div class="r ver"><div class="tm">10:03</div><div><div class="lb">Verified ✓</div><div class="d">photo · geo · recipient · coordinator sign-off</div></div><div class="ev">Verified</div></div>
+            </div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= S3 · App Home board ================= -->
+<section id="s3" class="slide">
+  <div class="cap"><div class="ic">R<span class="d">.</span></div><div><h2>One board: every open need, every drifting promise.</h2><p>The App Home operations board — live counters, attention list, and drift, all from the ledger.</p></div><div class="ey">Relay · App Home<br>operations board</div></div>
+  <div class="win">
+    <div class="side">
+      <div class="ws"><div class="b">C</div><div class="n">Chennai Flood Relief<small>relief.slack.com</small></div></div>
+      <div class="sec">Channels</div>
+      <div class="ch"><span class="h">#</span>relay-intake</div>
+      <div class="ch"><span class="h">#</span>relay-dispatch</div>
+      <div class="ch"><span class="h">#</span>relay-volunteers</div>
+      <div class="ch"><span class="h">#</span>relay-hq</div>
+      <div class="ch"><span class="h">#</span>relay-judges</div>
+      <div class="sec">Apps</div>
+      <div class="ch app act"><span class="ai">R.</span>Relay<span class="badge">Home</span></div>
+    </div>
+    <div class="main">
+      <div class="chead"><div class="t">Relay</div><div class="topic">Home · Messages · About</div></div>
+      <div class="home">
+        <div class="ht"><span class="ai">R.</span>Operations board</div>
+        <div class="subt">Chennai Flood Relief · updated just now · all figures from the ledger</div>
+        <div class="counts">
+          <div class="c"><div class="n" style="color:var(--red)">7</div><div class="l">Open needs</div></div>
+          <div class="c"><div class="n" style="color:var(--red)">2</div><div class="l">Critical</div></div>
+          <div class="c"><div class="n" style="color:var(--amber)">1</div><div class="l">Drifting</div></div>
+          <div class="c"><div class="n" style="color:var(--green)">12</div><div class="l">Verified &amp; closed</div></div>
+        </div>
+        <div class="panel">
+          <div class="ph">⚑ Needs your attention</div>
+          <div class="row"><span class="sv" style="background:var(--red)"></span><div class="ti">Medical run · Adyar <small>critical · dialysis · unassigned 6 min</small></div><span class="st">OPEN</span><span class="btn pri">Assign</span></div>
+          <div class="row"><span class="sv" style="background:var(--amber)"></span><div class="ti">Water ×20 · T. Nagar <small>high · SLA drift +9 min · Karthik V.</small></div><span class="st">DRIFTING</span><span class="btn">Nudge</span></div>
+          <div class="row"><span class="sv" style="background:var(--red)"></span><div class="ti">Shelter · 4 people · Riverside <small>critical · needs review · low confidence</small></div><span class="st">NEEDS REVIEW</span><span class="btn">Review</span></div>
+        </div>
+        <div class="panel">
+          <div class="ph">⏱ Drifting obligations · auto-reassign armed</div>
+          <div class="row"><span class="sv" style="background:var(--amber)"></span><div class="ti">Water ×20 · T. Nagar <small>backup ready: Meera S. · 0.6 mi</small></div><span class="st">+9 min</span><span class="btn">Reassign</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= S4 · Evidence-gated close ================= -->
+<section id="s4" class="slide">
+  <div class="cap"><div class="ic">R<span class="d">.</span></div><div><h2>Nothing closes on someone's word.</h2><p>Delivery requires a photo, a location, the recipient's confirmation, and a coordinator sign-off.</p></div><div class="ey">Relay · evidence packet<br>close-gated by severity</div></div>
+  <div class="win">
+    <div class="side">
+      <div class="ws"><div class="b">C</div><div class="n">Chennai Flood Relief<small>relief.slack.com</small></div></div>
+      <div class="sec">Channels</div>
+      <div class="ch"><span class="h">#</span>relay-intake</div>
+      <div class="ch act"><span class="h">#</span>relay-dispatch</div>
+      <div class="ch"><span class="h">#</span>relay-volunteers</div>
+      <div class="ch"><span class="h">#</span>relay-hq</div>
+      <div class="ch"><span class="h">#</span>relay-judges</div>
+      <div class="sec">Apps</div>
+      <div class="ch app"><span class="ai">R.</span>Relay</div>
+    </div>
+    <div class="main">
+      <div class="chead"><div class="t"><span class="h">#</span>relay-dispatch</div><div class="topic">Verify delivery · Need N-0142</div><div class="mem">👥 9</div></div>
+      <div class="conv">
+        <div class="msg"><div class="av" style="background:var(--red)">R.</div><div class="body"><div class="hd"><span class="nm">Relay</span><span class="app">App</span><span class="tm">10:03 AM</span></div><div class="txt">@Priya R. marked this delivered. Close is gated until the evidence packet is complete.</div>
+          <div class="card g">
+            <div class="top"><div style="flex:1"><div class="sub">Need N-0142 · Hot meals ×3 · Velachery</div><div class="h4">Evidence packet</div></div><span class="pill grn">verified ✓</span></div>
+            <div class="note">Earlier close attempt <b>rejected</b> — INSUFFICIENT_EVIDENCE (recipient not yet confirmed).</div>
+            <div class="check">
+              <div class="ci"><div class="bx on">✓</div><div class="cl">Photo attached <small>delivery at the terrace · geotagged</small></div></div>
+              <div class="ci"><div class="bx on">✓</div><div class="cl">Location confirmed <small>Velachery · within 60 m of the need</small></div></div>
+              <div class="ci"><div class="bx on">✓</div><div class="cl">Recipient confirmed <small>beneficiary tapped “received”</small></div></div>
+              <div class="ci"><div class="bx on">✓</div><div class="cl">Coordinator sign-off <small>@Divya (coordinator) · human gate</small></div></div>
+            </div>
+            <div class="note g">All four present → status advanced to <b>Verified → Closed</b>. Appended to the ledger; PII stays in the vault.</div>
+          </div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= S5 · Ask-Relay assistant ================= -->
+<section id="s5" class="slide">
+  <div class="cap"><div class="ic">R<span class="d">.</span></div><div><h2>Ask Relay in plain language.</h2><p>Answers are grounded in the PII-free ledger and cite real permalinks — and it refuses what it shouldn't answer.</p></div><div class="ey">Relay · Slack AI + RTS<br>Ask-Relay assistant</div></div>
+  <div class="win">
+    <div class="side">
+      <div class="ws"><div class="b">C</div><div class="n">Chennai Flood Relief<small>relief.slack.com</small></div></div>
+      <div class="sec">Channels</div>
+      <div class="ch"><span class="h">#</span>relay-intake</div>
+      <div class="ch"><span class="h">#</span>relay-dispatch</div>
+      <div class="ch"><span class="h">#</span>relay-volunteers</div>
+      <div class="ch"><span class="h">#</span>relay-hq</div>
+      <div class="ch"><span class="h">#</span>relay-judges</div>
+      <div class="sec">Apps</div>
+      <div class="ch app act"><span class="ai">R.</span>Relay<span class="badge">chat</span></div>
+    </div>
+    <div class="main">
+      <div class="chead"><div class="t">✨ Ask Relay</div><div class="topic">Assistant · grounded in the ledger</div></div>
+      <div class="conv">
+        <div class="msg"><div class="av" style="background:#3B6FB0">DK</div><div class="body"><div class="hd"><span class="nm">Divya (coordinator)</span><span class="tm">10:20 AM</span></div><div class="txt">Any critical needs still open, and where?</div></div></div>
+        <div class="msg"><div class="av" style="background:var(--red)">R.</div><div class="body"><div class="hd"><span class="nm">Relay</span><span class="app">App</span><span class="tm">10:20 AM</span></div>
+          <div class="txt">Two critical needs are open right now:</div>
+          <div class="card" style="max-width:680px">
+            <div class="top" style="padding-bottom:8px"><div style="flex:1"><div class="h4" style="font-size:1rem">🔴 Medical run · Adyar <span class="mono" style="font-weight:400;color:var(--slate);font-size:.8rem">· N-0151</span></div></div><span class="pill red">unassigned</span></div>
+            <div class="top" style="padding-top:0;padding-bottom:14px"><div style="flex:1"><div class="h4" style="font-size:1rem">🔴 Shelter · 4 people · Riverside <span class="mono" style="font-weight:400;color:var(--slate);font-size:.8rem">· N-0148</span></div></div><span class="pill amb">needs review</span></div>
+            <div class="foot">grounded in the ledger · cited: <span class="cite">#relay-dispatch permalink ↗</span> · no beneficiary contact in this answer</div>
+          </div>
+          <div class="txt" style="margin-top:10px;color:var(--slate);font-size:.9rem">I can't dispatch emergency services — Relay coordinates volunteer relief, it isn't an emergency line. Want me to flag either for assignment?</div>
+        </div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

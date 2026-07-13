@@ -20,18 +20,21 @@ Relay runs the full relief loop inside a Slack workspace: **Intake → Triage �
 - **Verify** — nothing closes on someone's word. Delivery requires an evidence packet (photo, location, recipient confirmation) and coordinator sign-off for high-severity needs.
 - **Report** — a live situation report for coordinators, and a donor-ready impact report where every number links to a ledger event and beneficiary PII never reaches the model.
 
+**And Relay closes the loop with the person who asked.** When a coordinator assigns a need, Relay replies in the requester's *own* message thread — in their language (English or Tamil–English) — so the person who sent the plea knows help is on the way. They never have to learn the system; Relay meets them in the conversation they already started.
+
 ## Qualifying technologies used
 
 Relay uses **all three**, each with a real job.
 
 - **Slack AI capabilities** — the **Ask-Relay assistant** (Bolt `Assistant`). Opening a thread sets suggested prompts; a question sets a "thinking" status and returns an answer grounded in the PII-free ledger with cited permalinks. It refuses out-of-scope questions and, as a safety behavior, refuses emergency-dispatch questions ("Relay coordinates volunteer relief — it is not an emergency service"). `src/assistant/askRelay.ts`.
 - **Real-Time Search (RTS) API** — an `assistant.search.context` client (`src/assistant/rts.ts`), hardened with throttling and retry, grounds Ask-Relay in live field context the ledger doesn't hold. It **lights up when a Slack user token (`xoxp-`) is present** (the `search:read.*` scopes are user-token scopes); without one it degrades to a deterministic mock and answers ledger-only. Results are cited and never persisted, per the API terms.
-- **MCP integration** — Relay is **exposed as a read-only MCP server** (`src/mcp-server/`): `search_needs`, `get_need`, `get_sitrep`, over the same PII-free projections the app uses. `npm run mcp` plugs it straight into Claude Desktop, so an external agent can ask "list open critical needs" and get the same numbers as App Home.
+- **MCP integration** — Relay is **exposed as an MCP server** (`src/mcp-server/`): three read tools (`search_needs`, `get_need`, `get_sitrep`) over the same PII-free projections the app uses, plus one opt-in write tool, `pledge_support`, so an external agent can pledge to fulfil a need (a human still confirms it through the same Assign gate). `npm run mcp` plugs it straight into Claude Desktop, so an external agent can ask "list open critical needs" and get the same numbers as App Home.
 
 ## Technological implementation
 
 - **Event-sourced, append-only ledger.** State changes happen only by appending typed events to `need_events`; current state is a projection. Immutability is enforced by a Postgres trigger — a normal `UPDATE`/`DELETE` is rejected ("append-only"), proven in an integration test. A logic change is a replay, not a migration. The audit trail is the product.
 - **The LLM proposes; deterministic code decides.** Extraction returns a Zod-validated `NeedDraft`; the pure engine decides every transition. On a validation failure the pipeline runs one repair pass, then routes to `NEEDS_REVIEW` — it never guesses.
+- **One engine, not one demo.** The same deterministic engine runs a *second, unrelated scenario* — a heatwave — driven entirely by a config-level SLA table, with no code changes. Nothing about the flood is hardcoded; the loop generalizes to any coordination crisis.
 - **Humans in command.** Confirm, assign, merge, sign-off, and close all require a human actor; the engine rejects agent/system actors on those transitions rather than trusting the caller. Dedupe auto-*detects* duplicates but the merge itself is a human click.
 - **Numbers are never hallucinated.** Sitreps and reports render immutable `{{stat:*}}` tokens computed from the ledger; a validator rejects any digit in the narrative not backed by a stat, regenerating twice before falling back to a deterministic template. Proven: a fabricated figure fed by a mock model never reaches the output.
 - **PII minimized by construction.** Beneficiary contact lives only in an AES-256-GCM `contact_vault`; the ledger and every LLM input are zero-copy. A reveal writes an `audit_log` row. The donor report grep-verifies zero seeded phone numbers in its output.

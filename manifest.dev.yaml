@@ -24,8 +24,8 @@ features:
         message: Give me the current situation report.
   slash_commands:
     - command: /relay
-      description: sitrep · report · need · volunteer · demo
-      usage_hint: "sitrep | report | need | volunteer | demo start flood-1"
+      description: sitrep · report · volunteer · volunteers · demo
+      usage_hint: "sitrep | report | volunteer | volunteers | demo start flood-1"
       should_escape: false
 # Scope/event audit 2026-07-07: reconciled against actual call sites + registered
 # handlers. REMOVED app_mentions:read (no app_mention handler), reactions:read +
@@ -52,6 +52,11 @@ oauth_config:
       - im:read
       - im:write
       - users:read
+    # User-token scope for the Real-Time Search API (assistant.search.context). Keep to
+    # search:read.* only — do NOT add user-token *:history scopes (they conflict with the
+    # message.* bot events). Semantic search needs a Slack AI Search plan; sandbox = keyword.
+    user:
+      - search:read.public
 settings:
   event_subscriptions:
     bot_events:

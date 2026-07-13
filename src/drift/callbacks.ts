@@ -1,6 +1,7 @@
 import type { Notifier } from '../ingest/notifier';
 import type { NeedService } from '../ledger/needService';
 import type { ProjectedNeed } from '../ledger/types';
+import { logger } from '../lib/logger';
 import type { LlmProvider } from '../llm/provider';
 import { matchRationale } from '../match/rationale';
 import { type LocalityCoord, type ScoreNeed, topN } from '../match/scorer';
@@ -42,11 +43,18 @@ export function buildDriftCallbacks(deps: DriftCallbackDeps): DriftCallbacks {
   const notifyNudge = async (need: ProjectedNeed, kind: NudgeKind): Promise<void> => {
     if (need.assigned_volunteer_id === null) return; // nobody to nudge
     const publicId = await deps.resolvePublicId(need.need_id);
-    await deps.notifier.postDirect(
-      need.assigned_volunteer_id,
-      `${publicId} needs an update`,
-      buildNudgeBlocks(need, publicId, kind),
-    );
+    try {
+      await deps.notifier.postDirect(
+        need.assigned_volunteer_id,
+        `${publicId} needs an update`,
+        buildNudgeBlocks(need, publicId, kind),
+      );
+    } catch (err) {
+      // Best-effort: DMing the volunteer can fail (a seed/demo volunteer isn't a real Slack
+      // user → channel_not_found). The nudge is a side effect — the drift state is already on
+      // the ledger — so a failed DM must not abort the drift sweep or the reassign that follows.
+      logger.warn({ err: (err as Error).message, need_id: need.need_id }, 'drift: nudge DM failed (non-fatal)');
+    }
   };
 
   const proposeReassign = async (need: ProjectedNeed, excludeVolunteerId?: string): Promise<void> => {

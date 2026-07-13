@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Relay — video frames</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800;900&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0F151C;--panel:#18222E;--panel2:#1C2734;--text:#F3EFE8;--slate:#93A2AF;
+    --line:rgba(255,255,255,.12);--red:#C1272D;--redt:#F2726B;--green:#63BF90;--greent:#63BF90;
+    --red-soft:rgba(240,102,95,.13);--green-soft:rgba(99,191,144,.13);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Public Sans',system-ui,-apple-system,Arial,sans-serif;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  .mono{font-family:'IBM Plex Mono',monospace}
+  .slide{display:none}
+  .slide:target{display:flex}
+  .slide{width:1920px;height:1080px;align-items:center;justify-content:center;overflow:hidden}
+  /* full cards */
+  .card{background:radial-gradient(120% 120% at 50% 0%, #16202B 0%, #0F151C 60%);color:var(--text);text-align:center;flex-direction:column}
+  .icon{width:132px;height:132px;border-radius:30px;background:radial-gradient(130% 150% at 18% 10%,#D8393F,#C1272D 52%,#9E1D22);display:flex;align-items:center;justify-content:center;font-family:'Archivo';font-weight:800;font-size:4.4rem;color:#FBFAF7;box-shadow:0 24px 60px -20px rgba(193,39,45,.6);margin-bottom:36px}
+  .icon .dot{margin-left:2px}
+  .wordmark{font-family:'Archivo';font-weight:800;font-size:5.2rem;letter-spacing:-.03em;color:var(--text);line-height:1}
+  .wordmark .rd{color:var(--redt);margin-left:2px}
+  .wordmark.small{font-size:3rem;margin-bottom:26px}
+  .tag{font-size:1.55rem;color:var(--slate);margin-top:26px;font-weight:500;letter-spacing:.2px}
+  .eyebrow{font-family:'IBM Plex Mono';font-size:1rem;letter-spacing:.28em;text-transform:uppercase;color:var(--redt);margin-bottom:30px}
+  /* hook */
+  .hook h1{font-family:'Archivo';font-weight:800;font-size:5.4rem;line-height:1.04;letter-spacing:-.03em;max-width:20ch;text-wrap:balance;padding:0 8%}
+  .hook .accent{color:var(--redt)}
+  /* stat */
+  .statwrap{width:1400px}
+  .simlabel{display:inline-flex;align-items:center;gap:12px;font-family:'IBM Plex Mono';font-size:1rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--slate);border:1.5px dashed var(--slate);border-radius:10px;padding:10px 20px;margin-bottom:44px}
+  .cols{display:grid;grid-template-columns:1fr 1fr;gap:28px;text-align:left}
+  .col{border-radius:22px;padding:38px 40px}
+  .col.base{background:var(--red-soft);border:1px solid rgba(240,102,95,.3)}
+  .col.relay{background:var(--green-soft);border:1px solid rgba(99,191,144,.32)}
+  .collabel{font-family:'IBM Plex Mono';font-size:1rem;letter-spacing:.1em;text-transform:uppercase;margin-bottom:26px}
+  .col.base .collabel{color:var(--redt)}
+  .col.relay .collabel{color:var(--greent)}
+  .statline{font-size:1.7rem;color:var(--text);line-height:2;font-weight:500}
+  .statline b{font-family:'Archivo';font-weight:800;font-size:2.3rem;margin-right:12px}
+  .col.base .statline b{color:var(--redt)}
+  .col.relay .statline b{color:var(--greent)}
+  .delta{margin-top:40px;font-family:'IBM Plex Mono';font-size:1.35rem;color:var(--text);text-align:center;letter-spacing:.01em}
+  .delta b{color:var(--greent)}
+  /* close */
+  .close h2{font-family:'Archivo';font-weight:800;font-size:4.6rem;letter-spacing:-.03em;line-height:1.05;max-width:22ch;text-wrap:balance}
+  .close .url{font-family:'IBM Plex Mono';font-size:1.4rem;color:var(--slate);margin-top:40px;letter-spacing:.02em}
+  /* caption overlays (transparent frames) */
+  .pillframe{align-items:flex-end;justify-content:flex-start;padding:0 0 72px 72px;background:transparent}
+  .pill{display:inline-flex;align-items:center;gap:13px;font-family:'IBM Plex Mono';font-size:1.5rem;font-weight:500;color:#F3EFE8;background:rgba(15,21,28,.82);border:1.5px solid rgba(255,255,255,.16);border-radius:14px;padding:16px 26px;backdrop-filter:blur(6px)}
+  .pill .d{width:12px;height:12px;border-radius:50%;background:var(--redt);flex:0 0 auto}
+  .pill.sim{border-style:dashed}
+</style>
+</head>
+<body>
+
+<!-- s1 · OPEN / brand -->
+<section id="s1" class="slide card">
+  <div style="display:flex;flex-direction:column;align-items:center">
+    <div class="icon">R<span class="dot">.</span></div>
+    <div class="wordmark">Relay<span class="rd">.</span></div>
+    <div class="tag">Verified crisis coordination inside Slack</div>
+  </div>
+</section>
+
+<!-- s2 · HOOK -->
+<section id="s2" class="slide card hook">
+  <h1>In a disaster, the deadliest thing is a <span class="accent">lost message.</span></h1>
+</section>
+
+<!-- s3 · STAT (counterfactual) -->
+<section id="s3" class="slide card">
+  <div class="statwrap">
+    <div style="text-align:center"><span class="simlabel">Simulated · flood-1 · measured from both runs</span></div>
+    <div class="cols">
+      <div class="col base">
+        <div class="collabel">Group-chat baseline</div>
+        <div class="statline"><b>2</b>needs left unclaimed</div>
+        <div class="statline"><b>2</b>families served twice</div>
+        <div class="statline"><b>0</b>deliveries verified</div>
+      </div>
+      <div class="col relay">
+        <div class="collabel">Relay</div>
+        <div class="statline"><b>14</b>needs tracked</div>
+        <div class="statline"><b>2</b>duplicates caught</div>
+        <div class="statline"><b>1</b>verified on a full evidence packet</div>
+      </div>
+    </div>
+    <div class="delta">Δ&nbsp;&nbsp;<b>2 double-serves avoided</b> · <b>2 requests kept owned</b> · <b>+1 verified delivery</b> over the baseline's zero</div>
+  </div>
+</section>
+
+<!-- s4 · CLOSE / sign-off -->
+<section id="s4" class="slide card close">
+  <div style="display:flex;flex-direction:column;align-items:center">
+    <div class="wordmark small">Relay<span class="rd">.</span></div>
+    <h2>Every plea heard.<br>Every promise proven.</h2>
+    <div class="url">relay-crisis-site.vercel.app</div>
+  </div>
+</section>
+
+<!-- s5 · caption: fictional -->
+<section id="s5" class="slide pillframe">
+  <div class="pill"><span class="d"></span>🧪 all data fictional · Relay Simulator</div>
+</section>
+
+<!-- s6 · caption: SLA compressed -->
+<section id="s6" class="slide pillframe">
+  <div class="pill"><span class="d"></span>SLA timers compressed for demo</div>
+</section>
+
+<!-- s7 · caption: simulated -->
+<section id="s7" class="slide pillframe">
+  <div class="pill sim"><span class="d"></span>Simulated — both runs measured</div>
+</section>
+
+</body>
+</html>

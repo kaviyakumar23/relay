@@ -2,6 +2,7 @@ import { SLA_MINUTES } from '../drift/sla';
 import type { NeedState, NeedType, ProjectedNeed, Severity } from '../ledger/types';
 import { TERMINAL_STATES } from '../ledger/types';
 import { applyHomeFilter, encodeHomeFilter, filterLabel, type HomeFilter } from './homeFilters';
+import { humanizeState } from './humanize';
 import {
   ACTIONS,
   actionId,
@@ -209,7 +210,7 @@ function quickAction(need: ProjectedNeed): SlackBlock | null {
 function attentionBlocks(needs: ProjectedNeed[], label: LabelFn): SlackBlock[] {
   const out: SlackBlock[] = [];
   for (const n of needs) {
-    const line = `${SEVERITY_EMOJI[n.severity]} *${n.type}* · ${label(n)} · ${localityLabel(n)}  ·  \`${statusBadge(n)}\``;
+    const line = `${SEVERITY_EMOJI[n.severity]} *${n.type}* · ${n.severity} · ${label(n)} · ${localityLabel(n)}  ·  \`${statusBadge(n)}\``;
     out.push({ type: 'section', text: { type: 'mrkdwn', text: line }, accessory: viewButton(n) });
     const quick = quickAction(n);
     if (quick) out.push(actions([quick]));
@@ -383,7 +384,7 @@ export function appHomeView(needs: ProjectedNeed[], opts: HomeViewOptions = {}):
     );
     const populated = STATUS_ORDER.filter((s) => stats.byStatus[s] > 0);
     if (populated.length > 0) {
-      blocks.push(fields(populated.map((s) => `${STATUS_EMOJI[s]} *${s}:* ${stats.byStatus[s]}`)));
+      blocks.push(fields(populated.map((s) => `${STATUS_EMOJI[s]} *${humanizeState(s)}:* ${stats.byStatus[s]}`)));
     }
   }
 

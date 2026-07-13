@@ -1690,7 +1690,9 @@ export function buildSlackApp(deps: SlackAppDeps): BuiltSlackApp {
         await say({ text: result.answer, blocks } as unknown as Parameters<typeof say>[0]);
       } catch (err) {
         logger.error({ err }, 'assistant: askRelay failed');
-        await say('I hit an error reading the ledger — try again in a moment.');
+        await say(
+          'I hit an error reading the ledger. You can try again in a moment, ask a narrower question (a locality, or “open criticals”), or open the Relay App Home for the live board.',
+        );
       }
     },
   });

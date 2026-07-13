@@ -2,6 +2,7 @@ import type { BackupCandidate } from '../drift/prewarm';
 import type { NeedEvent } from '../ledger/events';
 import type { ProjectedNeed } from '../ledger/types';
 import { appHomeView, type HomeViewOptions } from '../surfaces/appHome';
+import { humanizeState } from '../surfaces/humanize';
 import { dispatchCard } from '../surfaces/needCard';
 import type { SlackBlock } from '../surfaces/primitives';
 
@@ -85,8 +86,10 @@ export interface SlackClientLike {
   };
 }
 
-/** A one-line fallback text for a card (screen readers / notifications). No message content. */
-const cardFallback = (need: DispatchTarget): string => `${need.publicId} · new need in dispatch`;
+/** A one-line fallback text for a card (screen readers / notifications). State-aware so an
+ * updated/verified card doesn't keep announcing "new need". No beneficiary content. */
+const cardFallback = (need: DispatchTarget, projection: ProjectedNeed): string =>
+  `${need.publicId} · ${humanizeState(projection.state)} · ${projection.type}`;
 
 /**
  * Production notifier on the Slack Web API. The dispatch channel is resolved at
@@ -103,7 +106,7 @@ export class SlackNotifier implements Notifier {
     const channel = this.dispatchChannel();
     const res = await this.client.chat.postMessage({
       channel,
-      text: cardFallback(need),
+      text: cardFallback(need, projection),
       blocks: renderCardBlocks(need.publicId, projection, opts),
     });
     return { channel: res.channel ?? channel, ts: res.ts ?? '' };
@@ -118,7 +121,7 @@ export class SlackNotifier implements Notifier {
     await this.client.chat.update({
       channel: ref.channel,
       ts: ref.ts,
-      text: cardFallback(need),
+      text: cardFallback(need, projection),
       blocks: renderCardBlocks(need.publicId, projection, opts),
     });
   }
